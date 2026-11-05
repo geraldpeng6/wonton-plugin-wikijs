@@ -176,7 +176,7 @@ async function useOidc(jwt) {
 }
 
 // 站点地址跟着插件网页地址走；打开网页直接进 OIDC，不显示登录页。
-async function configureSite(jwt, fresh) {
+async function configureSite(jwt) {
   const args = {
     host: env('WONTON_APP_URL').replace(/\/+$/, ''),
     authAutoLogin: true,
@@ -184,8 +184,9 @@ async function configureSite(jwt, fresh) {
     securityTrustProxy: true,
   }
   const types = { host: 'String', title: 'String', authAutoLogin: 'Boolean', authHideLocal: 'Boolean', securityTrustProxy: 'Boolean' }
-  // 站点标题只在首次安装时给，主人改过的不在重建容器时被覆盖。
-  if (fresh) args.title = TITLE
+  // 标题只在还是上游默认值时写：向导中途失败过（配置已写、标题还是默认）也能补上，主人改过的不覆盖。
+  const { title } = (await graphql('{ site { config { title } } }', {}, jwt)).site.config
+  if (title === 'Wiki.js' || !title) args.title = TITLE
   const decl = Object.keys(args).map((name) => `$${name}:${types[name]}`).join(',')
   const fields = Object.keys(args).map((name) => `${name}:$${name}`).join(',')
   done((await graphql(
@@ -255,7 +256,7 @@ async function main() {
   const fresh = await finalize(password)
   const jwt = await login(password)
   await useOidc(jwt)
-  await configureSite(jwt, fresh)
+  await configureSite(jwt)
   if (fresh) await closeToGuests(jwt)
   try {
     await useChinese(jwt)

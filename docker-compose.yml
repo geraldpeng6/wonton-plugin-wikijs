@@ -112,6 +112,7 @@ x-wonton:
     - owner.identity
     # 界面语言包、扩展更新都从上游的 Graph 读；页面本身不联网。
     - network.egress
+  # 上游没写最低内存；本机空闲实测约 256M，取 512M。镜像支持 amd64 和 arm64（清单列表里有这两个平台的 manifest）。
   requirements:
     arch: [amd64, arm64]
     memory: 512M
