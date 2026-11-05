@@ -7,10 +7,18 @@
 #       要断言多个工具时改成写 mcp_check；调用前要备数据时写 before_mcp。
 # 装之前要准备（如先配出口代理）：写 before_install。
 
-web_assert() { grep -q '你好'; }   # 示例页的标题
+web_assert() { grep -q '知识库'; }   # 走完 OIDC 后落了应用真实页面，站点标题在其中
 
-identity_check() { # 页面回显的就是网关注入的用户名
-  local page
-  page="$(dweb /)" || { echo "页面失败：$page"; return 1; }
-  grep -qF "你好，$SMOKE_OWNER" <<<"$page" || { echo "页面没回显用户 $SMOKE_OWNER：$(head -c 120 <<<"$page")"; return 1; }
+# 应用自己的“当前用户”查询：认出的必须是 OIDC 建的、带主人邮箱的账号。
+identity_check() {
+  local out
+  out="$(web_get /graphql -X POST -H 'Content-Type: application/json' \
+    -d '{"query":"{ users { profile { email providerKey } list { email providerKey } } }"}')" ||
+    { echo "查询当前用户失败：$out"; return 1; }
+  jq -e --arg e "$SMOKE_OWNER_EMAIL" \
+    '.data.users.profile.email == $e and .data.users.profile.providerKey == "oidc"' <<<"$out" >/dev/null ||
+    { echo "当前用户不是主人的 OIDC 账号：$out"; return 1; }
+  # users.list 要 manage 权限：列得出来就是管理员
+  jq -e '.data.users.list | length >= 1' <<<"$out" >/dev/null ||
+    { echo "列不出用户，当前用户不是管理员：$out"; return 1; }
 }
