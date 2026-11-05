@@ -1,0 +1,9 @@
+port: 3000
+bindIP: 0.0.0.0
+# 数据库用镜像自带的 SQLite：一个文件，备份就是拷数据目录，不需要第二个服务和另一套凭据。
+db:
+  type: sqlite
+  storage: /data/wiki.sqlite
+# 缓存和上传都在数据目录里，重建容器不丢；镜像里的 /wiki/data 会跟着容器消失。
+dataPath: /data/data
+logLevel: info

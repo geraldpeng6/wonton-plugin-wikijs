@@ -1,61 +1,117 @@
-# 示例插件：nginx 显示一个网页，向登录的人问好。照着 README 的“写插件”换成你的应用。
+# Wiki.js 知识库：页面、层级目录、Markdown 和所见即所得编辑器，按组和页面规则分配权限。
+# 登录走核心的身份提供方（OIDC），打开网页即以主人身份进入，不出现 Wiki.js 自己的登录页。
+# 上游官方镜像 ghcr.io/requarks/wiki，按清单列表（index）的摘要固定；数据库用镜像自带的 SQLite，不要第二个服务。
+name: wikijs
+
 services:
-  web:
-    # 镜像按摘要固定（多架构镜像写清单列表的摘要），标签只给人看。
-    image: nginx:1.30.6-alpine@sha256:0e52bd054126cdc040b1276c0af347aeb02a41b9cfe305d6094767ac30e97949
-    # 包里的文件经 configs 交给容器（核心在启动前写进去），不能用卷挂载。
+  wiki:
+    image: &image ghcr.io/requarks/wiki:2.5.317@sha256:e4708eed80c014449c0c8426c8d466c7a52a62131555bb44372fa48378b448b8
+    # 镜像以 node 用户运行；数据目录归用户的用户。
+    user: "${PUID}:${PGID}"
+    environment:
+      TZ: ${TZ}
+      # 配置从包里的 config.yml 读，上游的镜像默认值只走环境变量，给不了 SQLite 的存储路径和写数据目录。
+      CONFIG_FILE: /etc/wiki/config.yml
+      # Wiki.js 的账号必须有邮箱，而核心只在主人配了邮箱时才发 email 声明；引用它让没配的主人在安装时就停下，
+      # 而不是打开网页才在登录时报错。
+      WONTON_OWNER_EMAIL: ${WONTON_OWNER_EMAIL:?核心没有注入主人邮箱，先在云吞里配好}
+    volumes:
+      - ${WONTON_APP_DATA}/data:/data
     configs:
-      - source: site
-        target: /etc/nginx/conf.d/default.conf
-      - source: page
-        target: /usr/share/nginx/html/index.html
+      - source: config
+        target: /etc/wiki/config.yml
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      # 首页只在安装向导阶段是 200；配置好以后访客没有权限、首页会转登录。所以先探首页，不行再用一个读站点设置的
+      # 简单查询确认进程和数据库都可用。
+      test:
+        - CMD-SHELL
+        - >-
+          wget -q -O /dev/null http://127.0.0.1:3000/ ||
+          curl -fsS -o /dev/null -H 'Content-Type: application/json'
+          -d '{"query":"{ site { config { host } } }"}' http://127.0.0.1:3000/graphql
       interval: 30s
       timeout: 5s
-      start_period: 30s
-      start_interval: 1s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
+
+  # 一次性服务：上游没有环境变量或命令行的初始化开关，首次安装时替主人走完安装向导，再把它的登录换成 OIDC。
+  # 已有配置时向导接口返回 404，脚本只核对身份配置，所以每次创建容器都跑一遍也没关系。
+  init:
+    image: *image
+    user: "${PUID}:${PGID}"
+    entrypoint: ["node", "/etc/wiki/init.mjs"]
+    environment:
+      TZ: ${TZ}
+      WONTON_APP_URL: ${WONTON_APP_URL}
+      WONTON_SECRET_ADMIN_PASSWORD: ${WONTON_SECRET_ADMIN_PASSWORD}
+      WONTON_OIDC_ISSUER: ${WONTON_OIDC_ISSUER}
+      WONTON_OIDC_CLIENT_ID: ${WONTON_OIDC_CLIENT_ID}
+      WONTON_OIDC_CLIENT_SECRET: ${WONTON_OIDC_CLIENT_SECRET}
+      WONTON_OIDC_AUTH_URL: ${WONTON_OIDC_AUTH_URL}
+      WONTON_OIDC_TOKEN_URL: ${WONTON_OIDC_TOKEN_URL}
+      WONTON_OIDC_USERINFO_URL: ${WONTON_OIDC_USERINFO_URL}
+    volumes:
+      - ${WONTON_APP_DATA}/data:/data
+    configs:
+      - source: init
+        target: /etc/wiki/init.mjs
+    depends_on:
+      wiki:
+        condition: service_healthy
+    restart: "no"
 
 configs:
-  site:
-    file: web/default.conf
-  page:
-    file: web/index.html
+  config:
+    file: config/config.yml
+  init:
+    file: config/init.mjs
 
 x-wonton:
   spec: "0.4"
-  # 换成你自己的：反向域名形式，装上以后不能改。
-  id: app.example.hello
-  version: 0.1.1
+  id: io.requarks.wikijs
+  version: 0.1.0
   kind: app
-  title: { zh: 你好, en: Hello }
-  description: { zh: 向登录的人问好的示例网页, en: An example page that greets whoever is signed in }
-  icon: icon.svg
+  title: { zh: 知识库, en: Wiki }
+  description: { zh: 家里的知识库，Markdown 和所见即所得编辑，按组分配权限, en: A knowledge base for your household with Markdown and visual editing }
+  icon: icon.png
   notices: [NOTICE]
-  screenshots: [screenshots/home.png]
-  author: { name: Example }
-  homepage: https://nginx.org
-  # 应用（这里是 nginx）的许可证；插件包自己的许可证写在仓库的 LICENSE 里。
-  license: BSD-2-Clause
+  author: { name: geraldpeng6, url: https://github.com/geraldpeng6 }
+  homepage: https://js.wiki
+  license: AGPL-3.0-only
   tags:
-    zh: [工具]
-    en: [Tools]
+    zh: [知识库, 文档, 笔记]
+    en: [Wiki, Docs, Notes]
   about:
     zh: |
-      一个示例网页：登录以后，页面会向你问好。新建插件时可以照着改。
+      写下来就不丢：页面带层级目录、版本历史和标签，可以按组分配读写权限。默认只有主人看得到，访客组可以放开给不登录的人。
+
+      搜索按标题、描述和路径匹配，不搜正文——SQLite 下的内置搜索就是这样。
+
+      界面语言默认中文，语言包首次打开时从上游下载，需要联网；断网时是英文。
     en: |
-      An example page: once you are signed in, the page says hello. Copy it as a starting point for a new plugin.
-  release_notes: { zh: 名字和说明更新。, en: Product name and description update. }
+      Write it down and it stays: pages with a nested tree, version history and tags. Grant read or write per group, or publish to the whole network.
+
+      Search matches titles, descriptions and paths, not page bodies — that is what the built-in search does on SQLite.
+
+      The interface defaults to Chinese and the language pack is downloaded from upstream on first open, so it needs internet; without it the interface stays English.
+  release_notes: { zh: 第一个版本。, en: First release. }
   webui:
-    service: web
-    port: 80
-    # 应用不认 OIDC 时，由网关在请求上加上用户名（README 的“网页入口和登录”）。
-    sso: proxy
-    proxy:
-      headers:
-        Remote-User: "{user}"
-  permissions: []
-  # 上游 nginx 官方镜像，amd64 和 arm64 都有；上游没写最低内存，按本机空闲实测取整（实测约 24M，取 64M）。
+    service: wiki
+    port: 3000
+    sso: oidc
+    oidc:
+      redirect_paths: [/login/oidc/callback]
+      # Wiki.js 的 OIDC 客户端把密钥放在令牌请求的表单体里，不做 Basic 认证。
+      token_endpoint_auth_method: client_secret_post
+  secrets:
+    # 安装向导必须建一个本地管理员；界面上不显示它，只给 init 登录用。密码首次安装后抄进数据目录，重装沿用。
+    admin_password:
+      generate: { bytes: 32 }
+  permissions:
+    - owner.identity
+    # 界面语言包、扩展更新都从上游的 Graph 读；页面本身不联网。
+    - network.egress
   requirements:
     arch: [amd64, arm64]
-    memory: 64M
+    memory: 512M
