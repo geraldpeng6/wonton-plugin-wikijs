@@ -5,7 +5,7 @@ name: wikijs
 
 services:
   wiki:
-    image: &image ghcr.io/requarks/wiki:2.5.317@sha256:e4708eed80c014449c0c8426c8d466c7a52a62131555bb44372fa48378b448b8
+    image: ghcr.io/requarks/wiki:2.5.317@sha256:e4708eed80c014449c0c8426c8d466c7a52a62131555bb44372fa48378b448b8
     # 镜像以 node 用户运行；数据目录归用户的用户。
     user: "${PUID}:${PGID}"
     environment:
@@ -38,7 +38,7 @@ services:
   # 一次性服务：上游没有环境变量或命令行的初始化开关，首次安装时替主人走完安装向导，再把它的登录换成 OIDC。
   # 已有配置时向导接口返回 404，脚本只核对身份配置，所以每次创建容器都跑一遍也没关系。
   init:
-    image: *image
+    image: ghcr.io/requarks/wiki:2.5.317@sha256:e4708eed80c014449c0c8426c8d466c7a52a62131555bb44372fa48378b448b8
     user: "${PUID}:${PGID}"
     entrypoint: ["node", "/etc/wiki/init.mjs"]
     environment:
