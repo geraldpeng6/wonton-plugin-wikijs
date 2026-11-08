@@ -48,7 +48,8 @@ site_id() {
 
 data_write() { # 用随机标记写一页，标记存进状态目录
   local marker site body
-  marker="$(head -c 12 /dev/urandom | base64 | tr -d '=+/' | head -c 16)"
+  # 3.x 的路径只留小写字母数字和连字符，标记也用小写，路径才对得上。
+  marker="$(head -c 12 /dev/urandom | base64 | tr '[:upper:]' '[:lower:]' | tr -d '=+/' | head -c 16)"
   printf '%s' "$marker" >"$(marker_file)"
   oidc_login || return 1
   if site="$(site_id)" &&
@@ -78,7 +79,7 @@ data_check() { # 按标记搜回页面：搜索建在正文上，页面还在、
   body="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" \
     "$(site_origin)/_api/sites/$site/pages/search?query=$marker&locales=en")" ||
     { echo "搜索失败：$body"; return 1; }
-  jq -e --arg p "wonton-smoke-$marker" 'map(.path) | index($p) != null' <<<"$body" >/dev/null ||
+  jq -e --arg p "wonton-smoke-$marker" '.results | map(.path) | index($p) != null' <<<"$body" >/dev/null ||
     { echo "搜不到页面 wonton-smoke-$marker：$(head -c 200 <<<"$body")"; return 1; }
 }
 
