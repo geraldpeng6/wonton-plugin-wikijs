@@ -31,13 +31,13 @@ data_write() {
   local marker out page_id
   marker="wonton-smoke-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
   out="$(wikijs_gql "$(jq -nc --arg m "$marker" \
-    '{query:"mutation($p:String!){ pages { create(content:\"云吞冒烟标记\", description:\"\", editor:\"markdown\", isPrivate:false, isPublished:true, locale:\"en\", path:$p, title:$p) { response { result errorCode message } page { id path } } } }", variables:{p:$m}}')")" ||
-    { echo "createPage 请求失败：$out"; return 1; }
-  jq -e '.errors == null' <<<"$out" >/dev/null || { echo "createPage 出错：$out"; return 1; }
-  jq -e '.data.pages.createPage.response.result == "success"' <<<"$out" >/dev/null ||
-    { echo "createPage 没成功：$(head -c 300 <<<"$out")"; return 1; }
-  page_id="$(jq -r '.data.pages.createPage.page.id // empty' <<<"$out")"
-  [[ -n "$page_id" ]] || { echo "createPage 没回页面 id：$(head -c 300 <<<"$out")"; return 1; }
+    '{query:"mutation($p:String!){ pages { create(content:\"云吞冒烟标记\", description:\"\", editor:\"markdown\", isPrivate:false, isPublished:true, locale:\"en\", path:$p, title:$p) { responseResult { succeeded errorCode message } page { id path } } } }", variables:{p:$m}}')")" ||
+    { echo "create 请求失败：$out"; return 1; }
+  jq -e '.errors == null' <<<"$out" >/dev/null || { echo "create 出错：$out"; return 1; }
+  jq -e '.data.pages.create.responseResult.succeeded == true' <<<"$out" >/dev/null ||
+    { echo "create 没成功：$(head -c 300 <<<"$out")"; return 1; }
+  page_id="$(jq -r '.data.pages.create.page.id // empty' <<<"$out")"
+  [[ -n "$page_id" ]] || { echo "create 没回页面 id：$(head -c 300 <<<"$out")"; return 1; }
   jq -nc --arg i "$page_id" --arg p "$marker" '{id:$i,path:$p}' >"$(marker_file)"
 }
 
