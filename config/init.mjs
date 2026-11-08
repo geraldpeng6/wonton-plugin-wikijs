@@ -8,7 +8,7 @@ import { createRequire } from 'node:module'
 import { readFile, writeFile } from 'node:fs/promises'
 import { hasV2Data, migrateV2 } from './migrate2.mjs'
 
-const BASE = 'http://wiki:3000'
+const BASE = 'http://wiki:3000/_api'
 // 本地管理员的地址：不能和主人的邮箱相同，OIDC 首次登录要按邮箱建新账号。
 const ADMIN_EMAIL = 'admin@wonton.local'
 // 管理员的密码落在数据目录里：核心的密钥可能换掉，用同一个值登录才不会被上一次安装挡住。
@@ -51,7 +51,7 @@ async function request(method, path, body) {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(120_000),
   })
   for (const raw of response.headers.getSetCookie()) {
     const pair = raw.split(';', 1)[0]
@@ -108,7 +108,7 @@ async function localPassword() {
 // `/_api/` 的根路径被 Swagger UI 占着，站点要从它自己的接口取；`current` 按请求的主机名找，兜底是 `*`。
 async function waitReady() {
   await retry('等 Wiki.js 响应', async () => {
-    const site = await request('GET', '/api/sites/current')
+    const site = await request('GET', '/sites/current')
     if (!site?.id) throw new HttpError(500, '站点接口里没有 id')
   })
 }
@@ -117,7 +117,7 @@ async function login(password) {
   return retry(
     '登录本地管理员',
     async () => {
-      const result = await request('PUT', `/api/sites/${siteId}/auth/login`, {
+      const result = await request('PUT', `/sites/${siteId}/auth/login`, {
         strategyId: LOCAL_STRATEGY_ID,
         username: ADMIN_EMAIL,
         password,
@@ -153,21 +153,21 @@ async function useOidc(adminGroupId) {
       await sql('UPDATE authentication SET id = $1 WHERE id = $2', [STRATEGY_ID, rows[0].id])
       renamed = true
     } else {
-      const created = await request('POST', '/api/authentication/strategies', { module: 'oidc', ...fields })
+      const created = await request('POST', '/authentication/strategies', { module: 'oidc', ...fields })
       await sql('UPDATE authentication SET id = $1 WHERE id = $2', [STRATEGY_ID, created.id])
       renamed = true
     }
   }
   if (renamed) {
     // 进程里记的还是旧 id：建一条临时策略再删掉，两次都会重读策略表。
-    const dummy = await request('POST', '/api/authentication/strategies', {
+    const dummy = await request('POST', '/authentication/strategies', {
       module: 'local',
       displayName: 'reload',
     })
-    await request('DELETE', `/api/authentication/strategies/${dummy.id}`)
+    await request('DELETE', `/authentication/strategies/${dummy.id}`)
   }
   // 再写一遍：密钥换了（保留数据重装）也能更新，顺带把这次的展示名等字段写最终值。
-  await request('PUT', `/api/authentication/strategies/${STRATEGY_ID}`, fields)
+  await request('PUT', `/authentication/strategies/${STRATEGY_ID}`, fields)
 }
 
 // 站点：打开网页直接走身份提供方，本地登录只留给 init 和管理员兜底；标题只在还是上游默认值时改。
@@ -181,24 +181,24 @@ async function configureSite(site, siteId, imported) {
   }
   // 导入时站点名已经换成 2.x 的名字，这里不覆盖。
   if (!imported && (site.title === 'Default Site' || !site.title)) fields.title = TITLE
-  await request('PUT', `/api/sites/${siteId}`, fields)
+  await request('PUT', `/sites/${siteId}`, fields)
 }
 
 // 默认中文：语言包不在镜像里，从上游的仓库下载。断网时留在英文，界面照样能用，不因此让安装失败。
 async function useChinese(site, siteId) {
-  const locales = await request('GET', '/api/locales')
+  const locales = await request('GET', '/locales')
   let zh = locales.find((locale) => locale.code === LOCALE)
   if (!zh || !zh.isInstalled) {
-    await request('POST', '/api/locales/fetch')
-    locales.splice(0, locales.length, ...(await request('GET', '/api/locales')))
+    await request('POST', '/locales/fetch')
+    locales.splice(0, locales.length, ...(await request('GET', '/locales')))
     zh = locales.find((locale) => locale.code === LOCALE)
     if (!zh) {
       console.log('上游没有中文语言包，界面留在英文')
       return
     }
     if (!zh.isInstalled) {
-      await request('POST', `/api/locales/${LOCALE}/install`)
-      locales.splice(0, locales.length, ...(await request('GET', '/api/locales')))
+      await request('POST', `/locales/${LOCALE}/install`)
+      locales.splice(0, locales.length, ...(await request('GET', '/locales')))
       if (!locales.find((locale) => locale.code === LOCALE)?.isInstalled) {
         console.log('中文语言包没下下来，界面留在英文')
         return
@@ -206,7 +206,7 @@ async function useChinese(site, siteId) {
     }
   }
   const active = [...new Set([...(site.locales?.active ?? ['en']), LOCALE])]
-  await request('PUT', `/api/sites/${siteId}`, { locales: { ...site.locales, primary: LOCALE, active } })
+  await request('PUT', `/sites/${siteId}`, { locales: { ...site.locales, primary: LOCALE, active } })
 }
 
 // 升级：数据目录里有 2.x 的库、这边的库还是空的，就把 2.x 搬过来。搬过一次就不再来（标记文件）。
@@ -222,7 +222,7 @@ async function importFromV2(siteId) {
   const { totals, summary, title } = await migrateV2({ request, siteId, appUrl: env('WONTON_APP_URL') })
   console.log(`导入完成：${JSON.stringify(totals)}`)
   // 站点名跟着 2.x 的来，别让一次升级把主人起的名字改掉。
-  if (title) await request('PUT', `/api/sites/${siteId}`, { title })
+  if (title) await request('PUT', `/sites/${siteId}`, { title })
   for (const warning of summary?.warnings ?? []) console.log(`导入提醒：${warning}`)
   await writeFile(IMPORTED, JSON.stringify({ totals, at: new Date().toISOString() }) + '\n')
   return true
@@ -231,12 +231,12 @@ async function importFromV2(siteId) {
 // 没配置过的策略对站点还不可见，登录也走不通；本地管理员是唯一的入口，它必须在站点上。
 async function main() {
   await waitReady()
-  const site = await request('GET', '/api/sites/current')
+  const site = await request('GET', '/sites/current')
   siteId = site.id
 
   const password = await localPassword()
   await login(password)
-  await request('PUT', '/api/system/security', { trustProxy: true })
+  await request('PUT', '/system/security', { trustProxy: true })
 
   const [administrators] = await sql("SELECT id FROM groups WHERE name = 'Administrators'")
   if (!administrators) throw new Error('库里没有 Administrators 组')

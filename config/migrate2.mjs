@@ -178,10 +178,10 @@ export async function migrateV2({ request, siteId, appUrl }) {
       warnings: [],
     }
 
-    const preflight = await send(request, '/api/import/preflight', { manifest, siteId })
+    const preflight = await send(request, '/import/preflight', { manifest, siteId })
     if (!preflight.ok) throw new Error(`导入预检失败：${preflight.errors.join('；')}`)
 
-    const session = await send(request, '/api/import/sessions', {
+    const session = await send(request, '/import/sessions', {
       source: manifest.source.kind,
       sourceInstanceId: manifest.source.instanceId,
       sites: [{ sourceId: 'default', siteId }],
@@ -193,12 +193,12 @@ export async function migrateV2({ request, siteId, appUrl }) {
     // 顺序是导入器要求的：人跟组先到，页面才有作者；版本跟页面走。
     for (const stream of STREAMS) {
       const path = INSTANCE.has(stream)
-        ? `/api/import/sessions/${session.id}/streams/${stream}`
-        : `/api/import/sessions/${session.id}/sites/${siteId}/streams/${stream}`
+        ? `/import/sessions/${session.id}/streams/${stream}`
+        : `/import/sessions/${session.id}/sites/${siteId}/streams/${stream}`
       totals[stream] = await push(request, path, records(db, stream))
     }
 
-    const summary = await send(request, `/api/import/sessions/${session.id}/finish`, {})
+    const summary = await send(request, `/import/sessions/${session.id}/finish`, {})
     return { totals, summary, title: site.title ?? '' }
   } finally {
     db.close()
