@@ -6,7 +6,7 @@
 
 import { createRequire } from 'node:module'
 import { readFile, writeFile } from 'node:fs/promises'
-import { hasV2Data, migrateV2 } from './migrate2.mjs'
+import { hasV2Data, migrateV2, v2Leftovers } from './migrate2.mjs'
 
 const BASE = 'http://wiki:3000/_api'
 // 本地管理员的地址：不能和主人的邮箱相同，OIDC 首次登录要按邮箱建新账号。
@@ -15,6 +15,9 @@ const ADMIN_EMAIL = 'admin@wonton.local'
 const PASSWORD_FILE = '/data/admin-password'
 // 上游 2.x 的库文件由 migrate2.mjs 搬进 PostgreSQL，搬完写这个标记。
 const IMPORTED = '/data/.wonton-imported-2x'
+// 附件和评论自动迁移不搬：确认不要它们的人留这个文件（或给同名变量），之后的重建不再问。
+const DROP_FILE = '/data/.wonton-drop-attachments-comments'
+const DROP_VAR = 'WIKIJS_UPGRADE_DROP_ATTACHMENTS_COMMENTS'
 // 3.x 的登录回调地址里带策略的 UUID（/_api/auth/<id>/callback），而清单里的 redirect_paths 是静态的，
 // 所以策略的 id 固定成这个值（建好以后在库里改），核心登记的回调才和 Wiki.js 发出的对得上。
 const STRATEGY_ID = '4d18c8a0-1f2b-4a5e-9d0e-6c1f5a7b9c31'
@@ -218,6 +221,14 @@ async function useChinese(site, siteId) {
   await request('PUT', `/sites/${siteId}`, { locales: { ...site.locales, primary: LOCALE, active } })
 }
 
+// 附件和评论自动迁移不搬：默认停下让人确认，确认过就写标记文件（变量给的也算）。报错里的数量是这次数据库里的。
+async function dropAttachmentsComments() {
+  const asked = process.env[DROP_VAR] === '1'
+  const saved = await readFile(DROP_FILE, 'utf8').then(() => true, () => false)
+  if (asked && !saved) await writeFile(DROP_FILE, `${DROP_VAR}=1\n`)
+  return asked || saved
+}
+
 // 升级：数据目录里有 2.x 的库、这边的库还是空的，就把 2.x 搬过来。搬过一次就不再来（标记文件）。
 async function importFromV2(siteId) {
   if (await readFile(IMPORTED, 'utf8').catch(() => '')) return false
@@ -226,6 +237,18 @@ async function importFromV2(siteId) {
   if (count > 0) {
     console.log('库里已经有页面，跳过 2.x 导入')
     return false
+  }
+  const { attachments, comments } = v2Leftovers()
+  const drop = await dropAttachmentsComments()
+  if ((attachments > 0 || comments > 0) && !drop) {
+    throw new Error(
+      `2.x 的库里有 ${attachments} 个附件、${comments} 条评论，自动迁移不搬这两样，先停在升级前（2.x 的库没动）。` +
+        '要它们就先在 2.x 的管理区 → Utilities → “Export for Wiki.js 3.x” 导出一个 .wkbackup，' +
+        `确认不要（或者包已经在手上）再设 ${DROP_VAR}=1（或建文件 ${DROP_FILE}）装一次。`,
+    )
+  }
+  if (attachments > 0 || comments > 0) {
+    console.log(`按开关不搬 2.x 的 ${attachments} 个附件、${comments} 条评论，继续导入`)
   }
   console.log('数据目录里有 2.x 的库，开始导入')
   const { totals, summary, title } = await migrateV2({ request, siteId, appUrl: env('WONTON_APP_URL') })

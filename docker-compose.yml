@@ -80,6 +80,8 @@ services:
       WONTON_OIDC_ISSUER: ${WONTON_OIDC_ISSUER}
       WONTON_OIDC_CLIENT_ID: ${WONTON_OIDC_CLIENT_ID}
       WONTON_OIDC_CLIENT_SECRET: ${WONTON_OIDC_CLIENT_SECRET}
+      # 附件和评论自动迁移不搬：默认停下报数量，插件页里把这一项填 1 表示确认丢弃、继续装（见 README）。
+      WIKIJS_UPGRADE_DROP_ATTACHMENTS_COMMENTS: ${WONTON_SECRET_UPGRADE_DROP_ATTACHMENTS_COMMENTS:-}
     volumes:
       - ${WONTON_APP_DATA}/data:/data
     configs:
@@ -103,7 +105,8 @@ configs:
     file: config/migrate2.mjs
 
 x-wonton:
-  spec: "0.4"
+  # 0.8 起才有主人填的密钥（升级开关用 input 密钥给主人，见 secrets）。
+  spec: "0.8"
   id: io.requarks.wikijs
   version: 0.1.0
   kind: app
@@ -147,6 +150,15 @@ x-wonton:
     # 根管理员是兜底入口，界面上不显示登录表单；密码只给初始化脚本用。
     admin_password:
       generate: { bytes: 32 }
+    # 升级开关：附件和评论自动迁移不搬，填 1 表示确认丢弃它们继续装（见 README“从 2.x 升级”）。
+    # 这个值不是密钥，但密钥是插件拿到主人输入的唯一通道。
+    upgrade_drop_attachments_comments:
+      input:
+        title: { zh: 升级时丢弃附件和评论, en: Drop attachments and comments on upgrade }
+        description:
+          zh: 从 2.x 升级、2.x 里有附件或评论时，装 1 才继续（这两样自动迁移不搬）。不是升级可以留空。
+          en: Set to 1 to continue when upgrading from 2.x that has attachments or comments (the automatic import leaves both behind). Leave empty otherwise.
+        required: false
   permissions:
     - owner.identity
     # 界面语言包、扩展更新都从上游的仓库读；页面本身不联网。

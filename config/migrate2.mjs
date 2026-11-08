@@ -2,7 +2,7 @@
 // （导入按包里的 NDJSON 流一条条喂，格式见上游 dev/specs/wkbackup.md）。这里按那份规格直接读 SQLite 生成记录，
 // 不上传包：记录就是 2.x 的表行，重命名、路径改写、id 派生都由导入器自己做。
 //
-// 先搬人跟组（页面要作者），再搬目录、页面和版本；附件、评论、导航和设置这次不搬，由调用方报出来。
+// 先搬人跟组（页面要作者），再搬目录、页面和版本；附件、评论、导航和设置这次不搬，由调用方数出来、决定停不停。
 // 失败就让异常冒出去：数据都还在 wiki.sqlite 里，重跑一次导入是幂等的（页面按路径、用户按邮箱、版本按派生 id）。
 
 import { createHash } from 'node:crypto'
@@ -137,6 +137,17 @@ export function hasV2Data() {
   }
   try {
     return count(db, 'pages') > 0
+  } finally {
+    db.close()
+  }
+}
+
+// 自动迁移搬不走的用户数据：附件（`assets`，上传的图片和文件）和页面评论（`comments`）。
+// 调用方据此决定是停下还是照搬页面。
+export function v2Leftovers() {
+  const db = open()
+  try {
+    return { attachments: count(db, 'assets'), comments: count(db, 'comments') }
   } finally {
     db.close()
   }
