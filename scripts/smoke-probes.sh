@@ -9,14 +9,24 @@ site_origin() { printf '%s' "${SMOKE_WEB_URL%/}"; }
 # 3.x 的自动登录在浏览器里由 JS 发起，curl 拿不到，直接走它的 authorize 路由跟完整个跳转链；
 # 升级起点还是 2.x 时走 2.x 的 `/login/<策略>`。已有会话时再走一遍也安全。
 oidc_login() {
-  local target site
+  local target site resp status url
   if site="$(site_id)"; then
     target="$(site_origin)/_api/auth/4d18c8a0-1f2b-4a5e-9d0e-6c1f5a7b9c31/authorize?siteId=$site&redirect=%2F"
   else
     target="$(site_origin)/login/oidc"
   fi
-  curl -sS -L --noproxy '*' --max-time 90 -b "$SMOKE_JAR" -c "$SMOKE_JAR" -o /dev/null "$target" ||
-    { echo "OIDC 登录失败：$target"; return 1; }
+  resp="$(mktemp)"
+  status="$(curl -sS -L --noproxy '*' --max-time 90 -b "$SMOKE_JAR" -c "$SMOKE_JAR" -o "$resp" \
+    -w '%{http_code} %{url_effective}' "$target")" ||
+    { echo "OIDC 登录请求失败：$target"; rm -f "$resp"; return 1; }
+  url="${status#* }"
+  status="${status%% *}"
+  if [[ "$status" != 2* && "$status" != 3* ]] || [[ "$url" != "$(site_origin)"* ]]; then
+    echo "OIDC 登录没回到插件（HTTP $status，落在 $url）：$(head -c 300 "$resp")"
+    rm -f "$resp"
+    return 1
+  fi
+  rm -f "$resp"
 }
 
 # 应用自己的“当前用户”接口：认出的必须是主人本人、且是管理员。
@@ -51,7 +61,7 @@ data_write() { # 用随机标记写一页，标记存进状态目录
     # 2.x（升级起点）：它的 GraphQL 建页
     body="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -X POST -H 'Content-Type: application/json' \
       -d "$(jq -nc --arg p "wonton-smoke-$marker" --arg t "smoke $marker" --arg c "$marker" \
-        '{query:"mutation($path:String!,$title:String!,$content:String!){pages{create(path:$path,editor:\"markdown\",title:$title,content:$content,tags:[]){responseResult{succeeded message} page{id}}}}",variables:{path:$p,title:$t,content:$c}}')" \
+        '{query:"mutation($path:String!,$title:String!,$content:String!){pages{create(path:$path,editor:\"markdown\",title:$title,description:\"\",content:$content,isPublished:true,isPrivate:false,locale:\"en\",tags:[]){responseResult{succeeded message} page{id}}}}",variables:{path:$p,title:$t,content:$c}}')" \
       "$(site_origin)/graphql")" ||
       { echo "建页失败：$body"; return 1; }
     jq -e '.data.pages.create.responseResult.succeeded' <<<"$body" >/dev/null ||

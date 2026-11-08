@@ -253,6 +253,14 @@ async function main() {
   // 从 2.x 升上来看的是原来的页面，界面语言得跟着原来的主语言走；新装才设中文。
   const imported = await importFromV2(siteId)
   await configureSite(site, siteId, imported)
+  // 自检：登录入口必须答 302 跳去身份提供方；不答说明策略没生效，装上也登不进。
+  const login = await fetch(`${BASE}/auth/${STRATEGY_ID}/authorize?siteId=${siteId}`, {
+    redirect: 'manual',
+    signal: AbortSignal.timeout(30_000),
+  })
+  if (login.status !== 302) {
+    throw new Error(`OIDC 登录入口没就绪：HTTP ${login.status} ${(await login.text()).slice(0, 300)}`)
+  }
   if (!imported) {
     try {
       await useChinese(site, siteId)
