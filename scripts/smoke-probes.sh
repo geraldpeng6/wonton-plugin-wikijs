@@ -3,10 +3,13 @@
 
 web_assert() { grep -q '知识库'; }   # 走完 OIDC 后落了应用真实页面，站点标题在其中
 
+# 插件的网页地址可能带结尾斜杠，拼接口路径前先去掉，免得走出 `//_api` 落到应用外壳上。
+site_origin() { printf '%s' "${SMOKE_WEB_URL%/}"; }
+
 # 应用自己的“当前用户”接口：认出的必须是主人本人、且是管理员。
 identity_check() {
   local out
-  out="$(web_get /_api/users/whoami)" || { echo "查询当前用户失败：$out"; return 1; }
+  out="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" "$(site_origin)/_api/users/whoami")" || { echo "查询当前用户失败：$out"; return 1; }
   jq -e --arg e "$SMOKE_OWNER_EMAIL" '.authenticated == true and .email == $e' <<<"$out" >/dev/null ||
     { echo "当前用户不是主人的 OIDC 账号：$out"; return 1; }
   # 根管理员拿的是 manage:system
@@ -15,22 +18,26 @@ identity_check() {
 }
 
 # 数据：建一个路径带随机标记的页面，升级/重装后读回。3.x 用 REST；升级起点还是 2.x 时走它的 GraphQL。
-site_id() { web_get /_api/sites/current | jq -er '.id'; }
+site_id() {
+  curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" "$(site_origin)/_api/sites/current" | jq -er '.id'
+}
 
 data_write() { # 用随机标记写一页，标记存进状态目录
   local marker site body
   marker="$(head -c 12 /dev/urandom | base64 | tr -d '=+/' | head -c 16)"
   printf '%s' "$marker" >"$(marker_file)"
   if site="$(site_id)" &&
-    body="$(web_get "/_api/sites/$site/pages" -X POST -H 'Content-Type: application/json' \
+    body="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -X POST -H 'Content-Type: application/json' \
       -d "$(jq -nc --arg p "wonton-smoke-$marker" --arg t "smoke $marker" --arg c "$marker" \
-        '{path:$p,title:$t,editor:"markdown",content:$c,locale:"en"}')")"; then
+        '{path:$p,title:$t,editor:"markdown",content:$c,locale:"en"}')" \
+      "$(site_origin)/_api/sites/$site/pages")"; then
     jq -er '.page.id' <<<"$body" >"$(marker_id_file)" || { echo "建页响应里没有 id：$body"; return 1; }
   else
     # 2.x（升级起点）：它的 GraphQL 建页
-    body="$(web_get /graphql -X POST -H 'Content-Type: application/json' \
+    body="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -X POST -H 'Content-Type: application/json' \
       -d "$(jq -nc --arg p "wonton-smoke-$marker" --arg t "smoke $marker" --arg c "$marker" \
-        '{query:"mutation($path:String!,$title:String!,$content:String!){pages{create(path:$path,editor:\"markdown\",title:$title,content:$content,tags:[]){responseResult{succeeded message} page{id}}}}",variables:{path:$p,title:$t,content:$c}}')")" ||
+        '{query:"mutation($path:String!,$title:String!,$content:String!){pages{create(path:$path,editor:\"markdown\",title:$title,content:$content,tags:[]){responseResult{succeeded message} page{id}}}}",variables:{path:$p,title:$t,content:$c}}')" \
+      "$(site_origin)/graphql")" ||
       { echo "建页失败：$body"; return 1; }
     jq -e '.data.pages.create.responseResult.succeeded' <<<"$body" >/dev/null ||
       { echo "建页失败：$body"; return 1; }
@@ -42,7 +49,8 @@ data_check() { # 按标记搜回页面：搜索建在正文上，页面还在、
   local marker site body
   marker="$(cat "$(marker_file)")"
   site="$(site_id)" || { echo "取不到站点 id"; return 1; }
-  body="$(web_get "/_api/sites/$site/pages/search?query=$marker&locales=en")" ||
+  body="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" \
+    "$(site_origin)/_api/sites/$site/pages/search?query=$marker&locales=en")" ||
     { echo "搜索失败：$body"; return 1; }
   jq -e --arg p "wonton-smoke-$marker" 'map(.path) | index($p) != null' <<<"$body" >/dev/null ||
     { echo "搜不到页面 wonton-smoke-$marker：$(head -c 200 <<<"$body")"; return 1; }
