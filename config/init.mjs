@@ -107,10 +107,19 @@ async function localPassword() {
 // 等应用答得出站点：站点在库里，答得出来就说明库已经建好、管理员和本地登录策略都种下了。
 // `/_api/` 的根路径被 Swagger UI 占着，站点要从它自己的接口取；`current` 按请求的主机名找，兜底是 `*`。
 async function waitReady() {
-  await retry('等 Wiki.js 响应', async () => {
-    const site = await request('GET', '/sites/current')
-    if (!site?.id) throw new HttpError(500, '站点接口里没有 id')
-  })
+  let last
+  for (let attempt = 1; attempt <= 150; attempt++) {
+    try {
+      const site = await request('GET', '/sites/current')
+      if (site?.id) return
+      last = new Error('站点接口里没有 id')
+    } catch (err) {
+      // 应用刚起来时路由可能还没挂好，404 也算没就绪。
+      last = err
+    }
+    await sleep(2000)
+  }
+  throw new Error(`等 Wiki.js 响应：${last?.message ?? last}`)
 }
 
 async function login(password) {
