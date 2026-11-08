@@ -254,12 +254,12 @@ async function main() {
   const imported = await importFromV2(siteId)
   await configureSite(site, siteId, imported)
   // 自检：登录入口必须答 302 跳去身份提供方；不答说明策略没生效，装上也登不进。
-  const login = await fetch(`${BASE}/auth/${STRATEGY_ID}/authorize?siteId=${siteId}`, {
+  const entry = await fetch(`${BASE}/auth/${STRATEGY_ID}/authorize?siteId=${siteId}`, {
     redirect: 'manual',
     signal: AbortSignal.timeout(30_000),
   })
-  if (login.status !== 302) {
-    throw new Error(`OIDC 登录入口没就绪：HTTP ${login.status} ${(await login.text()).slice(0, 300)}`)
+  if (entry.status !== 302) {
+    throw new Error(`OIDC 登录入口没就绪：HTTP ${entry.status} ${(await entry.text()).slice(0, 300)}`)
   }
   if (!imported) {
     try {
