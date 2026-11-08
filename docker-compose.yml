@@ -1,17 +1,44 @@
 # Wiki.js 知识库：页面、层级目录、Markdown 和所见即所得编辑器，按组和页面规则分配权限。
 # 登录走核心的身份提供方（OIDC），打开网页即以主人身份进入，不出现 Wiki.js 自己的登录页。
-# 上游官方镜像 ghcr.io/requarks/wiki，按清单列表（index）的摘要固定；数据库用镜像自带的 SQLite，不要第二个服务。
+# 上游官方镜像 ghcr.io/requarks/wiki，按清单列表（index）的摘要固定；3.x 只认 PostgreSQL，库用同一个包里的服务。
 name: wikijs
 
 services:
+  db:
+    image: postgres:18@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
+    environment:
+      TZ: ${TZ}
+      POSTGRES_DB: wiki
+      POSTGRES_USER: wiki
+      POSTGRES_PASSWORD: ${WONTON_SECRET_DB_PASSWORD}
+    volumes:
+      - ${WONTON_APP_DATA}/db:/var/lib/postgresql
+    healthcheck:
+      # 镜像自带的官方检查：连得上、库已建好并接受查询。
+      test: ["CMD", "pg_isready", "-U", "wiki", "-d", "wiki"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      start_interval: 2s
+    restart: unless-stopped
+
   wiki:
-    image: ghcr.io/requarks/wiki:2.5.317@sha256:e4708eed80c014449c0c8426c8d466c7a52a62131555bb44372fa48378b448b8
+    image: ghcr.io/requarks/wiki:3.2.0@sha256:b0ad43b76e8663c8125b2d1cf560f0c6537731024f0a8abd4d8f19478d367f32
     # 镜像以 node 用户运行；数据目录归用户的用户。
     user: "${PUID}:${PGID}"
     environment:
       TZ: ${TZ}
-      # 配置从包里的 config.yml 读，上游的镜像默认值只走环境变量，给不了 SQLite 的存储路径和写数据目录。
+      # 配置从包里的 config.yml 读，库的参数经 `$(名字)` 由启动时代入。
       CONFIG_FILE: /etc/wiki/config.yml
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: wiki
+      DB_PASS: ${WONTON_SECRET_DB_PASSWORD}
+      DB_NAME: wiki
+      DB_SCHEMA: wiki
+      # 根管理员只在第一次启动、库还空着时创建：密码核心生成，日常登录走云吞身份，它只作兜底。
+      ADMIN_EMAIL: admin@wonton.local
+      ADMIN_PASS: ${WONTON_SECRET_ADMIN_PASSWORD}
       # Wiki.js 的账号必须有邮箱，而核心只在主人配了邮箱时才发 email 声明；引用它让没配的主人在安装时就停下，
       # 而不是打开网页才在登录时报错。
       WONTON_OWNER_EMAIL: ${WONTON_OWNER_EMAIL:?核心没有注入主人邮箱，先在云吞里配好}
@@ -20,42 +47,46 @@ services:
     configs:
       - source: config
         target: /etc/wiki/config.yml
+      - source: health
+        target: /etc/wiki/health.mjs
+    depends_on:
+      db:
+        condition: service_healthy
     healthcheck:
-      # 首页只在安装向导阶段是 200；配置好以后访客没有权限、首页会转登录。所以先探首页，不行再用一个读站点设置的
-      # 简单查询确认进程和数据库都可用。
-      test:
-        - CMD-SHELL
-        - >-
-          wget -q -O /dev/null http://127.0.0.1:3000/ ||
-          curl -fsS -o /dev/null -H 'Content-Type: application/json'
-          -d '{"query":"{ site { config { host } } }"}' http://127.0.0.1:3000/graphql
+      # 应用答得出启动接口、库真连得上才算可用，见 config/health.mjs。
+      test: ["CMD", "node", "/etc/wiki/health.mjs"]
       interval: 30s
-      timeout: 5s
+      timeout: 15s
       retries: 3
       start_period: 60s
-      start_interval: 2s
+      start_interval: 5s
+    restart: unless-stopped
 
-  # 一次性服务：上游没有环境变量或命令行的初始化开关，首次安装时替主人走完安装向导，再把它的登录换成 OIDC。
-  # 已有配置时向导接口返回 404，脚本只核对身份配置，所以每次创建容器都跑一遍也没关系。
+  # 一次性服务：接上核心的 OIDC、设站点和反代信任。都写最终值，每次创建容器都跑一遍。
   init:
-    image: ghcr.io/requarks/wiki:2.5.317@sha256:e4708eed80c014449c0c8426c8d466c7a52a62131555bb44372fa48378b448b8
+    image: ghcr.io/requarks/wiki:3.2.0@sha256:b0ad43b76e8663c8125b2d1cf560f0c6537731024f0a8abd4d8f19478d367f32
     user: "${PUID}:${PGID}"
     entrypoint: ["node", "/etc/wiki/init.mjs"]
     environment:
       TZ: ${TZ}
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: wiki
+      DB_PASS: ${WONTON_SECRET_DB_PASSWORD}
+      DB_NAME: wiki
       WONTON_APP_URL: ${WONTON_APP_URL}
+      WONTON_OWNER_EMAIL: ${WONTON_OWNER_EMAIL}
       WONTON_SECRET_ADMIN_PASSWORD: ${WONTON_SECRET_ADMIN_PASSWORD}
       WONTON_OIDC_ISSUER: ${WONTON_OIDC_ISSUER}
       WONTON_OIDC_CLIENT_ID: ${WONTON_OIDC_CLIENT_ID}
       WONTON_OIDC_CLIENT_SECRET: ${WONTON_OIDC_CLIENT_SECRET}
-      WONTON_OIDC_AUTH_URL: ${WONTON_OIDC_AUTH_URL}
-      WONTON_OIDC_TOKEN_URL: ${WONTON_OIDC_TOKEN_URL}
-      WONTON_OIDC_USERINFO_URL: ${WONTON_OIDC_USERINFO_URL}
     volumes:
       - ${WONTON_APP_DATA}/data:/data
     configs:
       - source: init
         target: /etc/wiki/init.mjs
+      - source: migrate
+        target: /etc/wiki/migrate2.mjs
     depends_on:
       wiki:
         condition: service_healthy
@@ -64,8 +95,12 @@ services:
 configs:
   config:
     file: config/config.yml
+  health:
+    file: config/health.mjs
   init:
     file: config/init.mjs
+  migrate:
+    file: config/migrate2.mjs
 
 x-wonton:
   spec: "0.4"
@@ -86,13 +121,13 @@ x-wonton:
     zh: |
       写下来就不丢：页面带层级目录、版本历史和标签，可以按组分配读写权限。默认只有主人看得到，访客组可以放开给不登录的人。
 
-      搜索按标题、描述和路径匹配，不搜正文——SQLite 下的内置搜索就是这样。
+      搜索按标题、描述和正文做全文检索。
 
       界面语言默认中文，语言包首次打开时从上游下载，需要联网；断网时是英文。
     en: |
       Write it down and it stays: pages with a nested tree, version history and tags. Grant read or write per group, or publish to the whole network.
 
-      Search matches titles, descriptions and paths, not page bodies — that is what the built-in search does on SQLite.
+      Search is full text over page titles, descriptions and bodies.
 
       The interface defaults to Chinese and the language pack is downloaded from upstream on first open, so it needs internet; without it the interface stays English.
   release_notes: { zh: 第一个版本。, en: First release. }
@@ -101,18 +136,22 @@ x-wonton:
     port: 3000
     sso: oidc
     oidc:
-      redirect_paths: [/login/oidc/callback]
+      # 回调地址里带策略的 UUID；init 把策略的 id 固定成同一个值（见 config/init.mjs）。
+      redirect_paths: [/_api/auth/4d18c8a0-1f2b-4a5e-9d0e-6c1f5a7b9c31/callback]
       # Wiki.js 的 OIDC 客户端把密钥放在令牌请求的表单体里，不做 Basic 认证。
       token_endpoint_auth_method: client_secret_post
   secrets:
-    # 安装向导必须建一个本地管理员；界面上不显示它，只给 init 登录用。密码首次安装后抄进数据目录，重装沿用。
+    # 库的密码核心生成，只给 db 和 wiki 用。
+    db_password:
+      generate: { bytes: 32 }
+    # 根管理员是兜底入口，界面上不显示登录表单；密码只给初始化脚本用。
     admin_password:
       generate: { bytes: 32 }
   permissions:
     - owner.identity
-    # 界面语言包、扩展更新都从上游的 Graph 读；页面本身不联网。
+    # 界面语言包、扩展更新都从上游的仓库读；页面本身不联网。
     - network.egress
-  # 上游没写最低内存；本机空闲实测约 256M，取 512M。镜像支持 amd64 和 arm64（清单列表里有这两个平台的 manifest）。
+  # 上游写最低内存 1G；本机只装知识库，取 1G。镜像支持 amd64 和 arm64（清单列表里有这两个平台的 manifest）。
   requirements:
     arch: [amd64, arm64]
-    memory: 512M
+    memory: 1G

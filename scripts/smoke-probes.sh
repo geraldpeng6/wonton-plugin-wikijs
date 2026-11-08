@@ -3,51 +3,57 @@
 
 web_assert() { grep -q '知识库'; }   # 走完 OIDC 后落了应用真实页面，站点标题在其中
 
-# 应用自己的“当前用户”查询：认出的必须是 OIDC 建的、带主人邮箱的账号。
+# 应用自己的“当前用户”接口：认出的必须是主人本人、且是管理员。
 identity_check() {
   local out
-  out="$(web_get /graphql -X POST -H 'Content-Type: application/json' \
-    -d '{"query":"{ users { profile { email providerKey } list { email providerKey } } }"}')" ||
-    { echo "查询当前用户失败：$out"; return 1; }
-  jq -e --arg e "$SMOKE_OWNER_EMAIL" \
-    '.data.users.profile.email == $e and .data.users.profile.providerKey == "oidc"' <<<"$out" >/dev/null ||
+  out="$(web_get /_api/users/whoami)" || { echo "查询当前用户失败：$out"; return 1; }
+  jq -e --arg e "$SMOKE_OWNER_EMAIL" '.authenticated == true and .email == $e' <<<"$out" >/dev/null ||
     { echo "当前用户不是主人的 OIDC 账号：$out"; return 1; }
-  # users.list 要 manage 权限：列得出来就是管理员
-  jq -e '.data.users.list | length >= 1' <<<"$out" >/dev/null ||
-    { echo "列不出用户，当前用户不是管理员：$out"; return 1; }
+  # 根管理员拿的是 manage:system
+  jq -e '.permissions | index("manage:system") != null' <<<"$out" >/dev/null ||
+    { echo "当前用户不是管理员：$out"; return 1; }
 }
 
-marker_file() { # SMOKE_STATE 在套件里是状态目录（e2e 传的是标记文件本身），标记放对应路径
-  if [[ -d "$SMOKE_STATE" ]]; then printf '%s' "$SMOKE_STATE/wikijs-marker"; else printf '%s' "${SMOKE_STATE}.marker"; fi
+# 数据：建一个路径带随机标记的页面，升级/重装后读回。3.x 用 REST；升级起点还是 2.x 时走它的 GraphQL。
+site_id() { web_get /_api/ | jq -er '.site.id'; }
+
+data_write() { # 用随机标记写一页，标记存进状态目录
+  local marker site body
+  marker="$(head -c 12 /dev/urandom | base64 | tr -d '=+/' | head -c 16)"
+  printf '%s' "$marker" >"$(marker_file)"
+  if site="$(site_id)" &&
+    body="$(web_get "/_api/sites/$site/pages" -X POST -H 'Content-Type: application/json' \
+      -d "$(jq -nc --arg p "wonton-smoke-$marker" --arg t "smoke $marker" --arg c "$marker" \
+        '{path:$p,title:$t,editor:"markdown",content:$c,locale:"en"}')")"; then
+    jq -er '.page.id' <<<"$body" >"$(marker_id_file)" || { echo "建页响应里没有 id：$body"; return 1; }
+  else
+    # 2.x（升级起点）：它的 GraphQL 建页
+    body="$(web_get /graphql -X POST -H 'Content-Type: application/json' \
+      -d "$(jq -nc --arg p "wonton-smoke-$marker" --arg t "smoke $marker" --arg c "$marker" \
+        '{query:"mutation($path:String!,$title:String!,$content:String!){pages{create(path:$path,editor:\"markdown\",title:$title,content:$content,tags:[]){responseResult{succeeded message} page{id}}}}",variables:{path:$p,title:$t,content:$c}}')")" ||
+      { echo "建页失败：$body"; return 1; }
+    jq -e '.data.pages.create.responseResult.succeeded' <<<"$body" >/dev/null ||
+      { echo "建页失败：$body"; return 1; }
+    jq -er '.data.pages.create.page.id' <<<"$body" >"$(marker_id_file)"
+  fi
 }
 
-wikijs_gql() { # <query JSON>：带会话调 GraphQL
-  web_get /graphql -X POST -H 'Content-Type: application/json' -d "$1"
+data_check() { # 按标记搜回页面：搜索建在正文上，页面还在、正文没丢才搜得到
+  local marker site body
+  marker="$(cat "$(marker_file)")"
+  site="$(site_id)" || { echo "取不到站点 id"; return 1; }
+  body="$(web_get "/_api/sites/$site/pages/search?query=$marker&locales=en")" ||
+    { echo "搜索失败：$body"; return 1; }
+  jq -e --arg p "wonton-smoke-$marker" 'map(.path) | index($p) != null' <<<"$body" >/dev/null ||
+    { echo "搜不到页面 wonton-smoke-$marker：$(head -c 200 <<<"$body")"; return 1; }
 }
 
-# 数据：页面就是用户数据（SQLite 在插件数据目录，重装保留）。data_write 用 GraphQL 建一个路径带
-# 随机标记的页面，data_check 重装/升级后按 id 读回核对。
-data_write() {
-  local marker out page_id
-  marker="wonton-smoke-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-  out="$(wikijs_gql "$(jq -nc --arg m "$marker" \
-    '{query:"mutation($p:String!){ pages { create(content:\"云吞冒烟标记\", description:\"\", editor:\"markdown\", isPrivate:false, isPublished:true, locale:\"en\", path:$p, tags:[], title:$p) { responseResult { succeeded errorCode message } page { id path } } } }", variables:{p:$m}}')")" ||
-    { echo "create 请求失败：$out"; return 1; }
-  jq -e '.errors == null' <<<"$out" >/dev/null || { echo "create 出错：$out"; return 1; }
-  jq -e '.data.pages.create.responseResult.succeeded == true' <<<"$out" >/dev/null ||
-    { echo "create 没成功：$(head -c 300 <<<"$out")"; return 1; }
-  page_id="$(jq -r '.data.pages.create.page.id // empty' <<<"$out")"
-  [[ -n "$page_id" ]] || { echo "create 没回页面 id：$(head -c 300 <<<"$out")"; return 1; }
-  jq -nc --arg i "$page_id" --arg p "$marker" '{id:$i,path:$p}' >"$(marker_file)"
+marker_file() { # SMOKE_STATE 在 dev.sh probes 里是目录、在 e2e 里是文件，标记放旁边
+  if [[ -d "$SMOKE_STATE" ]]; then
+    printf '%s' "$SMOKE_STATE/wikijs-marker"
+  else
+    printf '%s' "${SMOKE_STATE}.marker"
+  fi
 }
 
-data_check() {
-  local out page_id
-  page_id="$(jq -r '.id // empty' "$(marker_file)" 2>/dev/null)" || true
-  [[ -n "$page_id" ]] || { echo "没有 data_write 留下的页面 id"; return 1; }
-  # schema 里 single(id: Int!)：id 按数字传（写成字符串会 GRAPHQL_VALIDATION_FAILED）。
-  out="$(wikijs_gql "$(jq -nc --argjson i "$page_id" '{query:"query($id:Int!){ pages { single(id:$id) { id path } } }", variables:{id:$i}}')")" ||
-    { echo "读页面失败：$out"; return 1; }
-  jq -e --argjson i "$page_id" '.errors == null and .data.pages.single.id == $i' <<<"$out" >/dev/null ||
-    { echo "升级/重装后找不到页面 $page_id：$(head -c 300 <<<"$out")"; return 1; }
-}
+marker_id_file() { printf '%s.id' "$(marker_file)"; }
