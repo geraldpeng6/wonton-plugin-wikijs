@@ -31,7 +31,7 @@ data_write() {
   local marker out page_id
   marker="wonton-smoke-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
   out="$(wikijs_gql "$(jq -nc --arg m "$marker" \
-    '{query:"mutation($p:String!){ pages { createPage(content:\"云吞冒烟标记\", description:\"\", editor:\"markdown\", isPrivate:false, isPublished:true, locale:\"en\", path:$p, title:$p) { response { result errorCode message } page { id path } } } }", variables:{p:$m}}')")" ||
+    '{query:"mutation($p:String!){ pages { create(content:\"云吞冒烟标记\", description:\"\", editor:\"markdown\", isPrivate:false, isPublished:true, locale:\"en\", path:$p, title:$p) { response { result errorCode message } page { id path } } } }", variables:{p:$m}}')")" ||
     { echo "createPage 请求失败：$out"; return 1; }
   jq -e '.errors == null' <<<"$out" >/dev/null || { echo "createPage 出错：$out"; return 1; }
   jq -e '.data.pages.createPage.response.result == "success"' <<<"$out" >/dev/null ||
