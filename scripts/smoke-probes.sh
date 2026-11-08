@@ -15,7 +15,7 @@ identity_check() {
 }
 
 # 数据：建一个路径带随机标记的页面，升级/重装后读回。3.x 用 REST；升级起点还是 2.x 时走它的 GraphQL。
-site_id() { web_get /_api/ | jq -er '.site.id'; }
+site_id() { web_get /_api/sites/current | jq -er '.id'; }
 
 data_write() { # 用随机标记写一页，标记存进状态目录
   local marker site body

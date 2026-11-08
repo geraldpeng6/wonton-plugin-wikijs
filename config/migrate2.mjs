@@ -8,7 +8,7 @@
 import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 
-const DB_FILE = '/data/wiki.sqlite'
+const DB_FILE = process.env.WIKI2_DB ?? '/data/wiki.sqlite'
 // 一批多少条：规矩是 500 条、16 MiB 封顶，页面一条可能有几 MB，取小一点省得撞 413。
 const BATCH_RECORDS = 200
 const BATCH_BYTES = 4 * 1024 * 1024
@@ -16,6 +16,9 @@ const BATCH_BYTES = 4 * 1024 * 1024
 const STREAMS = ['locales', 'groups', 'users', 'tree', 'pages', 'page-history']
 const INSTANCE = new Set(['locales', 'groups', 'users'])
 const INCLUDES = ['pages', 'history', 'users', 'groups']
+
+// SQLite 的布尔列进来是 0/1，导入器按 `=== true` 判断，先转回真布尔。
+const bool = (value) => value === true || value === 1 || value === '1' || value === 'true'
 
 const json = (text, fallback) => {
   if (!text) return fallback
@@ -39,7 +42,12 @@ function* records(db, stream) {
       break
     case 'groups':
       for (const row of rows(db, 'SELECT * FROM groups')) {
-        yield { ...row, permissions: json(row.permissions, []), pageRules: json(row.pageRules, []) }
+        yield {
+          ...row,
+          isSystem: bool(row.isSystem),
+          permissions: json(row.permissions, []),
+          pageRules: json(row.pageRules, []),
+        }
       }
       break
     case 'users':
@@ -47,20 +55,36 @@ function* records(db, stream) {
         const groups = rows(db, 'SELECT groupId FROM userGroups WHERE userId = ?', row.id).map(
           (entry) => entry.groupId,
         )
-        yield { ...row, providerKey: row.providerId, groups }
+        yield {
+          ...row,
+          providerKey: row.providerId,
+          groups,
+          isSystem: bool(row.isSystem),
+          isActive: bool(row.isActive),
+          isVerified: bool(row.isVerified),
+          tfaIsActive: bool(row.tfaIsActive),
+          mustChangePwd: bool(row.mustChangePwd),
+        }
       }
       break
     case 'tree':
-      yield* rows(db, 'SELECT * FROM pageTree WHERE isFolder = 1')
+      for (const row of rows(db, 'SELECT * FROM pageTree WHERE isFolder = 1')) {
+        yield { ...row, isFolder: true, isPrivate: bool(row.isPrivate) }
+      }
       break
     case 'pages':
       for (const row of rows(db, 'SELECT * FROM pages')) {
-        yield { ...row, tags: json(row.tags, []) }
+        yield {
+          ...row,
+          isPublished: bool(row.isPublished),
+          isPrivate: bool(row.isPrivate),
+          tags: json(row.tags, []),
+        }
       }
       break
     case 'page-history':
       for (const row of rows(db, 'SELECT * FROM pageHistory')) {
-        yield { ...row, tags: json(row.tags, []) }
+        yield { ...row, isPublished: bool(row.isPublished), tags: json(row.tags, []) }
       }
       break
   }

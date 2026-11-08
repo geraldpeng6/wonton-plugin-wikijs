@@ -104,11 +104,12 @@ async function localPassword() {
   return env('WONTON_SECRET_ADMIN_PASSWORD')
 }
 
-// 等应用答出启动接口：站点在库里，答得出来就说明库已经建好、管理员和本地登录策略都种下了。
+// 等应用答得出站点：站点在库里，答得出来就说明库已经建好、管理员和本地登录策略都种下了。
+// `/_api/` 的根路径被 Swagger UI 占着，站点要从它自己的接口取；`current` 按请求的主机名找，兜底是 `*`。
 async function waitReady() {
   await retry('等 Wiki.js 响应', async () => {
-    const bootstrap = await request('GET', '/_api/')
-    if (!bootstrap?.site?.id) throw new HttpError(500, '启动接口里没有站点')
+    const site = await request('GET', '/api/sites/current')
+    if (!site?.id) throw new HttpError(500, '站点接口里没有 id')
   })
 }
 
@@ -230,8 +231,7 @@ async function importFromV2(siteId) {
 // 没配置过的策略对站点还不可见，登录也走不通；本地管理员是唯一的入口，它必须在站点上。
 async function main() {
   await waitReady()
-  const bootstrap = await request('GET', '/_api/')
-  const site = bootstrap.site
+  const site = await request('GET', '/api/sites/current')
   siteId = site.id
 
   const password = await localPassword()
