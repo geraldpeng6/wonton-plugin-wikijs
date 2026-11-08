@@ -6,6 +6,7 @@
 // 失败就让异常冒出去：数据都还在 wiki.sqlite 里，重跑一次导入是幂等的（页面按路径、用户按邮箱、版本按派生 id）。
 
 import { createHash } from 'node:crypto'
+import { statSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 
 const DB_FILE = process.env.WIKI2_DB ?? '/data/wiki.sqlite'
@@ -120,8 +121,20 @@ async function push(request, path, list) {
   return total
 }
 
+// 2.x 的库是 WAL 模式，只读打开时旁边没有 -shm 会“unable to open database file”，所以按读写打开；
+// 2.x 已经不再跑这个库，写权限是安全的。
+function open() {
+  if (!statSync(DB_FILE).isFile()) throw new Error(`${DB_FILE} 不存在`)
+  return new DatabaseSync(DB_FILE)
+}
+
 export function hasV2Data() {
-  const db = new DatabaseSync(DB_FILE, { readOnly: true })
+  let db
+  try {
+    db = open()
+  } catch {
+    return false
+  }
   try {
     return count(db, 'pages') > 0
   } finally {
@@ -130,7 +143,7 @@ export function hasV2Data() {
 }
 
 export async function migrateV2({ request, siteId, appUrl }) {
-  const db = new DatabaseSync(DB_FILE, { readOnly: true })
+  const db = open()
   try {
     // 老库的 locales 没有 isActive/isPrimary 这些列，全取回来按有的字段排：主语言放最前。
     const localeCodes = rows(db, 'SELECT * FROM locales').sort(
