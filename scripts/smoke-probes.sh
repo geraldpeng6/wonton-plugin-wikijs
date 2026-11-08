@@ -45,8 +45,9 @@ data_check() {
   local out page_id
   page_id="$(jq -r '.id // empty' "$(marker_file)" 2>/dev/null)" || true
   [[ -n "$page_id" ]] || { echo "没有 data_write 留下的页面 id"; return 1; }
-  out="$(wikijs_gql "{\"query\":\"{ pages { single(id: \\\"$page_id\\\") { id path } } }\"}")" ||
+  # schema 里 single(id: Int!)：id 按数字传（写成字符串会 GRAPHQL_VALIDATION_FAILED）。
+  out="$(wikijs_gql "$(jq -nc --argjson i "$page_id" '{query:"query($id:Int!){ pages { single(id:$id) { id path } } }", variables:{id:$i}}')")" ||
     { echo "读页面失败：$out"; return 1; }
-  jq -e --arg i "$page_id" '.errors == null and .data.pages.single.id == $i' <<<"$out" >/dev/null ||
+  jq -e --argjson i "$page_id" '.errors == null and .data.pages.single.id == $i' <<<"$out" >/dev/null ||
     { echo "升级/重装后找不到页面 $page_id：$(head -c 300 <<<"$out")"; return 1; }
 }
