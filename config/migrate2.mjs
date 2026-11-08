@@ -108,7 +108,10 @@ export function hasV2Data() {
 export async function migrateV2({ request, siteId, appUrl }) {
   const db = new DatabaseSync(DB_FILE, { readOnly: true })
   try {
-    const localeCodes = rows(db, 'SELECT code, isActive FROM locales ORDER BY isActive DESC')
+    // 老库的 locales 没有 isActive/isPrimary 这些列，全取回来按有的字段排：主语言放最前。
+    const localeCodes = rows(db, 'SELECT * FROM locales').sort(
+      (a, b) => Number(b.isActive ?? 0) - Number(a.isActive ?? 0) || Number(b.isPrimary ?? 0) - Number(a.isPrimary ?? 0),
+    )
     const site = rows(db, "SELECT * FROM settings WHERE key IN ('title', 'host')").reduce(
       (acc, row) => ({ ...acc, [row.key]: json(row.value, {})?.v ?? '' }),
       {},

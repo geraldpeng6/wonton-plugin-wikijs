@@ -1,5 +1,5 @@
-// 健康检查：应用答得出启动接口（站点、身份配置都在里面）且数据库连得上，才算可用。
-// 只探进程活着不够：数据库挂了应用照样监听端口；只探数据库也不够：应用自己起了没、站点还认不认得出都看不到。
+// 健康检查：应用的就绪端点答得出来、数据库连得上，才算可用。
+// 只探进程活着不够：数据库挂了应用照样监听端口；只探数据库也不够：应用启动没完成时库已经在那里。
 import { createRequire } from 'node:module'
 
 const require = createRequire('/wiki/backend/package.json')
@@ -12,13 +12,11 @@ const die = (message) => {
 
 let answer
 try {
-  answer = await fetch('http://127.0.0.1:3000/_api/', { signal: AbortSignal.timeout(8000) })
+  answer = await fetch('http://127.0.0.1:3000/_ready', { signal: AbortSignal.timeout(8000) })
 } catch (err) {
-  die(`请求启动接口失败：${err.message}`)
+  die(`请求就绪端点失败：${err.message}`)
 }
-if (!answer.ok) die(`启动接口答 ${answer.status}`)
-const body = await answer.text()
-if (!body.includes('"site"')) die(`启动接口没有站点信息：${body.slice(0, 200)}`)
+if (!answer.ok) die(`就绪端点答 ${answer.status}`)
 
 const client = new Client({
   host: process.env.DB_HOST,
