@@ -16,7 +16,7 @@ web_assert() {
 # 不管对错都要把环境装回来：后面的探针还得跑，环境半死不活时它们的失败会盖住这里的结论。
 upgrade_guard() {
   local item=带附件升级停下 why="" out rc file dir count
-  [[ -d "$SMOKE_STATE" ]] || return 0
+  [[ -d "$SMOKE_STATE" ]] && return 0
   [[ -n "${upgrade_from:-}" ]] || { na "$item" "本仓库没有 tag，测不了升级"; return 0; }
   [[ ! -e "$SMOKE_STATE.guard-done" ]] || return 0
   dir="$SMOKE_DATA_DIR/apps/${SMOKE_PLUGIN_ID//./-}/data"
