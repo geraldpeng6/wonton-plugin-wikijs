@@ -47,17 +47,28 @@ run().catch((err) => console.log(`ERROR ${err.message}`))
 }
 
 upgrade_guard() {
-  local item=带附件升级停下 why="" out rc dir count wiki
+  local item=带附件升级停下 why="" out rc dir app wiki core_image count prev_url prev_origin
   [[ -d "$SMOKE_STATE" ]] && return 0
   [[ -n "${upgrade_from:-}" ]] || { na "$item" "本仓库没有 tag，测不了升级"; return 0; }
   [[ ! -e "$SMOKE_STATE.guard-done" ]] || return 0
-  dir="$SMOKE_DATA_DIR/apps/${SMOKE_PLUGIN_ID//./-}/data"
+  prev_url="${SMOKE_WEB_URL:-}"
+  prev_origin="${SMOKE_WEB_ORIGIN:-}"
+  app="$SMOKE_DATA_DIR/apps/${SMOKE_PLUGIN_ID//./-}"
+  dir="$app/data"
   wiki="wonton-$SMOKE_INSTANCE--${SMOKE_PLUGIN_ID//./-}--wiki"
   say "$item：从 tag $upgrade_from 重新装一遍"
-  if ! probes_dev uninstall --purge >>"$PROBES_LOG" 2>&1; then
+  # 只 uninstall 不 --purge：purge 会把密钥一起删掉，而失败的那次升级回滚会把密钥恢复成旧值，
+  # 重试时又是新值，库就认不上了（password authentication failed for user "wiki"）。
+  if ! probes_dev uninstall >>"$PROBES_LOG" 2>&1; then
     fail "$item" "卸掉当前装法失败，看 $PROBES_LOG 末尾：$(tail -c 200 "$PROBES_LOG" | tr '\n' ' ')"
     return 0
   fi
+  # 数据目录是核心以 root 建的，宿主机删不动，借一个本地镜像里的 rm 删。
+  core_image="$(sed -n 's/^WONTON_CORE_IMAGE=//p' "$SMOKE_DEV_STATE/.env" 2>/dev/null | tail -1)"
+  [[ -n "$core_image" ]] || { fail "$item" "读不到核心镜像名（$SMOKE_DEV_STATE/.env）"; return 0; }
+  docker run --rm --user 0 --entrypoint rm -v "$SMOKE_DATA_DIR:/host-data" "$core_image" \
+    -rf "/host-data/apps/${SMOKE_PLUGIN_ID//./-}" >>"$PROBES_LOG" 2>&1 ||
+    { fail "$item" "删不掉插件数据目录 $app"; return 0; }
   if probes_dev_t 600 install --yes "$upgrade_from" >>"$PROBES_LOG" 2>&1 &&
     probes_status_wait "$PROBES_PLUGIN_ID" 40 >/dev/null; then
     if ! probes_dev session >>"$PROBES_LOG" 2>&1 || ! probes_web_url "$item"; then
@@ -94,7 +105,13 @@ upgrade_guard() {
     why="${why:+$why；}给了开关还是装不上"
   fi
   probes_dev session >>"$PROBES_LOG" 2>&1
+  # 装不回来时插件列表里没有网页地址，别把先前的值冲成空：后面的探针照着报错更好懂。
   probes_web_url "$item"
+  if [[ -n "$prev_url" && -z "$SMOKE_WEB_URL" ]]; then
+    SMOKE_WEB_URL="$prev_url"
+    SMOKE_WEB_ORIGIN="$prev_origin"
+    export SMOKE_WEB_URL SMOKE_WEB_ORIGIN
+  fi
   : >"$SMOKE_STATE.guard-done"
   if [[ -n "$why" ]]; then
     fail "$item" "$why，看 $PROBES_LOG 末尾：$(tail -c 300 "$PROBES_LOG" | tr '\n' ' ')"
