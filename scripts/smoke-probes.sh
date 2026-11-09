@@ -49,7 +49,7 @@ run().catch((err) => console.log(`ERROR ${err.message}`))
 upgrade_guard() {
   local item=带附件升级停下 why="" out rc dir app wiki core_image count prev_url prev_origin
   [[ -d "$SMOKE_STATE" ]] && return 0
-  [[ -n "${upgrade_from:-}" ]] || { na "$item" "本仓库没有 tag，测不了升级"; return 0; }
+  [[ -n "${upgrade_from:-}" ]] || { na "$item" "本仓库没有 tag，测不了升级"; note "- N/A $item：本仓库没有 tag"; return 0; }
   [[ ! -e "$SMOKE_STATE.guard-done" ]] || return 0
   prev_url="${SMOKE_WEB_URL:-}"
   prev_origin="${SMOKE_WEB_ORIGIN:-}"
@@ -57,6 +57,10 @@ upgrade_guard() {
   dir="$app/data"
   wiki="wonton-$SMOKE_INSTANCE--${SMOKE_PLUGIN_ID//./-}--wiki"
   say "$item：从 tag $upgrade_from 重新装一遍"
+  note ""
+  note "### $item（起点 $upgrade_from）"
+  note ""
+  note "- 开始：卸载、从起点重装、写页面和附件"
   # 只 uninstall 不 --purge：purge 会把密钥一起删掉，而失败的那次升级回滚会把密钥恢复成旧值，
   # 重试时又是新值，库就认不上了（password authentication failed for user "wiki"）。
   if ! probes_dev uninstall >>"$PROBES_LOG" 2>&1; then
@@ -115,10 +119,18 @@ upgrade_guard() {
   : >"$SMOKE_STATE.guard-done"
   if [[ -n "$why" ]]; then
     fail "$item" "$why，看 $PROBES_LOG 末尾：$(tail -c 300 "$PROBES_LOG" | tr '\n' ' ')"
+    note "- FAIL：$why"
     return 0
   fi
   count="$(grep -o '有 [0-9]* 个附件、[0-9]* 条评论' <<<"$out" | head -1)"
   pass "$item" "有附件时升级停下，报错写明数量（$count）；给开关后能升上去"
+  note "- PASS：有附件时停下并报“$count”；给开关后能升上去"
+}
+
+# 探针的输出都被调用方重定向进冒烟日志，绿的那次又不带日志附件；结果再往 CI 的运行摘要里记一份，
+# 好让 run 链接自己能证明这条检查跑过（本地没有这个文件就什么也不做）。
+note() {
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then printf '%s\n' "$*" >>"$GITHUB_STEP_SUMMARY"; fi
 }
 
 # 插件的网页地址可能带结尾斜杠，拼接口路径前先去掉，免得走出 `//_api` 落到应用外壳上。
