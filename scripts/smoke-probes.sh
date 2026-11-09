@@ -10,26 +10,49 @@ web_assert() {
   return "$ok"
 }
 
-# 带附件升级必须停下：从升级起点重装一遍、写一页和一个附件，升到工作区版本要求失败且报出数量，
-# 给了开关（数据目录里的标记文件，生产里是插件页那一项）再装一次要能过、页面还在。
-# 只在端到端冒烟里跑一次；`dev.sh probes` 的 SMOKE_STATE 是目录，不在这里重装。
-# 不管对错都要把环境装回来：后面的探针还得跑，环境半死不活时它们的失败会盖住这里的结论。
-# 2.x 的本地管理员令牌：密码是 2.x init 落在数据目录里的，登录接口是它用的那套 GraphQL。
-admin_jwt() { # <插件数据目录>
-  local pw
-  pw="$(tr -d '\n' <"$1/admin-password")" || return 1
-  curl -sS --noproxy '*' --fail-with-body -X POST -H 'Content-Type: application/json' \
-    -d "$(jq -nc --arg u admin@wonton.local --arg p "$pw" \
-      '{query:"mutation($u:String!,$p:String!){authentication{login(username:$u,password:$p,strategy:\"local\"){jwt responseResult{message}}}}",variables:{u:$u,p:$p}}')" \
-    "$(site_origin)/graphql" | jq -er '.data.authentication.login.jwt'
+# 往 2.x 传一个附件：在容器里用 node 直连 3000，先拿本地管理员的 JWT 再 POST /u。
+# 不走网关的原因：/u 只认 Authorization 头（2.x 的 extractJWT 对 /u 直接忽略 cookie），配置好的会话用不上；
+# 本地管理员是根账号（Administrators 只有 manage:system，靠它的快捷放行过 write:assets）。
+upload_attachment() { # <wiki 容器名>；输出 “UPLOAD <状态> <正文>” 或 “LOGIN_FAIL …”
+  docker exec -i "$1" node -e '
+const fs = require("node:fs")
+const run = async () => {
+  const pw = fs.readFileSync("/data/admin-password", "utf8").trim()
+  const login = await fetch("http://localhost:3000/graphql", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      query: `mutation($u:String!,$p:String!){authentication{login(username:$u,password:$p,strategy:"local"){jwt responseResult{message}}}}`,
+      variables: { u: "admin@wonton.local", p: pw },
+    }),
+  })
+  const data = await login.json()
+  const jwt = data?.data?.authentication?.login?.jwt
+  if (!jwt) {
+    console.log(`LOGIN_FAIL ${login.status} ${JSON.stringify(data).slice(0, 300)}`)
+    return
+  }
+  const form = new FormData()
+  form.append("mediaUpload", JSON.stringify({ folderId: 0 }))
+  form.append("mediaUpload", new Blob(["wonton smoke attachment\n"]), "wonton-smoke.txt")
+  const res = await fetch("http://localhost:3000/u", {
+    method: "POST",
+    headers: { authorization: `Bearer ${jwt}` },
+    body: form,
+  })
+  console.log(`UPLOAD ${res.status} ${await res.text()}`)
+}
+run().catch((err) => console.log(`ERROR ${err.message}`))
+'
 }
 
 upgrade_guard() {
-  local item=带附件升级停下 why="" out rc file dir count jwt
+  local item=带附件升级停下 why="" out rc dir count wiki
   [[ -d "$SMOKE_STATE" ]] && return 0
   [[ -n "${upgrade_from:-}" ]] || { na "$item" "本仓库没有 tag，测不了升级"; return 0; }
   [[ ! -e "$SMOKE_STATE.guard-done" ]] || return 0
   dir="$SMOKE_DATA_DIR/apps/${SMOKE_PLUGIN_ID//./-}/data"
+  wiki="wonton-$SMOKE_INSTANCE--${SMOKE_PLUGIN_ID//./-}--wiki"
   say "$item：从 tag $upgrade_from 重新装一遍"
   if ! probes_dev uninstall --purge >>"$PROBES_LOG" 2>&1; then
     fail "$item" "卸掉当前装法失败，看 $PROBES_LOG 末尾：$(tail -c 200 "$PROBES_LOG" | tr '\n' ' ')"
@@ -42,21 +65,12 @@ upgrade_guard() {
     elif ! data_write; then
       why="在 2.x 上写页面失败"
     else
-      # 上传要 write:assets：2.x 的 Administrators 组只有 manage:system，靠后者的快捷放行，而 OIDC 会话在
-      # 2.x 上只拿到访客权限，所以按 2.x init 的做法用本地管理员的 JWT（密码 init 就落在数据目录里）。
-      if ! jwt="$(admin_jwt "$dir")"; then
-        why="拿不到 2.x 的本地管理员令牌：$(head -c 200 <<<"$jwt")"
-      else
-        file="$(mktemp)"
-        printf 'wonton smoke attachment\n' >"$file"
-        if ! out="$(curl -sS --noproxy '*' --fail-with-body -H "Authorization: Bearer $jwt" \
-          -F 'mediaUpload={"folderId":0}' -F "mediaUpload=@$file;filename=wonton-smoke.txt" "$(site_origin)/u")"; then
-          why="2.x 上传附件失败：$(head -c 300 <<<"$out")"
-        elif [[ "$out" != ok ]]; then
-          why="2.x 上传附件没成功：$(head -c 300 <<<"$out")"
-        fi
-        rm -f "$file"
-      fi
+      out="$(upload_attachment "$wiki")" || true
+      case "$out" in
+        'UPLOAD 200 ok') ;;
+        UPLOAD\ *) why="2.x 上传附件被拒：$(head -c 200 <<<"$out")" ;;
+        *) why="2.x 上传附件出错：$(head -c 200 <<<"$out")" ;;
+      esac
     fi
   else
     why="装 tag $upgrade_from 失败"
