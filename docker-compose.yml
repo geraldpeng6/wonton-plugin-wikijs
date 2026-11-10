@@ -105,8 +105,8 @@ configs:
     file: config/migrate2.mjs
 
 x-wonton:
-  # 0.8 起才有主人填的密钥（升级开关用 input 密钥给主人，见 secrets）。
-  spec: "0.8"
+  # 升级开关用主人填的密钥（input 密钥从 0.8 起）；spec 写现行的 0.11。
+  spec: "0.11"
   id: io.requarks.wikijs
   version: 0.1.0
   kind: app

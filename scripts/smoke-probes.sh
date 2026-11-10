@@ -55,7 +55,7 @@ upgrade_guard() {
   prev_origin="${SMOKE_WEB_ORIGIN:-}"
   app="$SMOKE_DATA_DIR/apps/${SMOKE_PLUGIN_ID//./-}"
   dir="$app/data"
-  wiki="wonton-$SMOKE_INSTANCE--${SMOKE_PLUGIN_ID//./-}--wiki"
+  wiki=""
   say "$item：从 tag $upgrade_from 重新装一遍"
   note ""
   note "### $item（起点 $upgrade_from）"
@@ -79,6 +79,8 @@ upgrade_guard() {
       why="在 2.x 上建不了会话或拿不到网页地址"
     elif ! data_write; then
       why="在 2.x 上写页面失败"
+    elif ! wiki="$(running_container "wonton-$SMOKE_INSTANCE--${SMOKE_PLUGIN_ID//./-}--wiki")"; then
+      why="找不到在跑的 wiki 容器"
     else
       out="$(upload_attachment "$wiki")" || true
       case "$out" in
@@ -146,8 +148,8 @@ oidc_login() {
     target="$(site_origin)/login/oidc"
   fi
   resp="$(mktemp)"
-  status="$(curl -sS -L --noproxy '*' --max-time 90 -b "$SMOKE_JAR" -c "$SMOKE_JAR" -o "$resp" \
-    -w '%{http_code} %{url_effective}' "$target")" ||
+  status="$(curl_t "$SMOKE_WEB_MAX_TIME" "$target" -sS -L --noproxy '*' -b "$SMOKE_JAR" -c "$SMOKE_JAR" \
+    -o "$resp" -w '%{http_code} %{url_effective}')" ||
     { echo "OIDC 登录请求失败：$target"; rm -f "$resp"; return 1; }
   url="${status#* }"
   status="${status%% *}"
@@ -163,7 +165,7 @@ oidc_login() {
 identity_check() {
   local out
   oidc_login || return 1
-  out="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" "$(site_origin)/_api/users/whoami")" || { echo "查询当前用户失败：$out"; return 1; }
+  out="$(curl_t "$SMOKE_WEB_MAX_TIME" "$(site_origin)/_api/users/whoami" --noproxy '*' --fail-with-body -b "$SMOKE_JAR")" || { echo "查询当前用户失败：$out"; return 1; }
   jq -e --arg e "$SMOKE_OWNER_EMAIL" '.authenticated == true and .email == $e' <<<"$out" >/dev/null ||
     { echo "当前用户不是主人的 OIDC 账号：$out"; return 1; }
   # 根管理员拿的是 manage:system
@@ -173,7 +175,7 @@ identity_check() {
 
 # 数据：建一个路径带随机标记的页面，升级/重装后读回。3.x 用 REST；升级起点还是 2.x 时走它的 GraphQL。
 site_id() {
-  curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" "$(site_origin)/_api/sites/current" | jq -er '.id'
+  curl_t "$SMOKE_WEB_MAX_TIME" "$(site_origin)/_api/sites/current" --noproxy '*' --fail-with-body -b "$SMOKE_JAR" | jq -er '.id'
 }
 
 data_write() { # 用随机标记写一页，标记存进状态目录
@@ -183,17 +185,17 @@ data_write() { # 用随机标记写一页，标记存进状态目录
   printf '%s' "$marker" >"$(marker_file)"
   oidc_login || return 1
   if site="$(site_id)" &&
-    body="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -X POST -H 'Content-Type: application/json' \
+    body="$(curl_t "$SMOKE_WEB_MAX_TIME" "$(site_origin)/_api/sites/$site/pages" --noproxy '*' --fail-with-body \
+      -b "$SMOKE_JAR" -X POST -H 'Content-Type: application/json' \
       -d "$(jq -nc --arg p "wonton-smoke-$marker" --arg t "smoke $marker" --arg c "$marker" \
-        '{path:$p,title:$t,editor:"markdown",content:$c,locale:"en"}')" \
-      "$(site_origin)/_api/sites/$site/pages")"; then
+        '{path:$p,title:$t,editor:"markdown",content:$c,locale:"en"}')")"; then
     jq -er '.page.id' <<<"$body" >"$(marker_id_file)" || { echo "建页响应里没有 id：$body"; return 1; }
   else
     # 2.x（升级起点）：它的 GraphQL 建页
-    body="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -X POST -H 'Content-Type: application/json' \
+    body="$(curl_t "$SMOKE_WEB_MAX_TIME" "$(site_origin)/graphql" --noproxy '*' --fail-with-body -b "$SMOKE_JAR" \
+      -X POST -H 'Content-Type: application/json' \
       -d "$(jq -nc --arg p "wonton-smoke-$marker" --arg t "smoke $marker" --arg c "$marker" \
-        '{query:"mutation($path:String!,$title:String!,$content:String!){pages{create(path:$path,editor:\"markdown\",title:$title,description:\"\",content:$content,isPublished:true,isPrivate:false,locale:\"en\",tags:[]){responseResult{succeeded message} page{id}}}}",variables:{path:$p,title:$t,content:$c}}')" \
-      "$(site_origin)/graphql")" ||
+        '{query:"mutation($path:String!,$title:String!,$content:String!){pages{create(path:$path,editor:\"markdown\",title:$title,description:\"\",content:$content,isPublished:true,isPrivate:false,locale:\"en\",tags:[]){responseResult{succeeded message} page{id}}}}",variables:{path:$p,title:$t,content:$c}}')")" ||
       { echo "建页失败：$body"; return 1; }
     jq -e '.data.pages.create.responseResult.succeeded' <<<"$body" >/dev/null ||
       { echo "建页失败：$body"; return 1; }
@@ -206,8 +208,8 @@ data_check() { # 按标记搜回页面：搜索建在正文上，页面还在、
   marker="$(cat "$(marker_file)")"
   oidc_login || return 1
   site="$(site_id)" || { echo "取不到站点 id"; return 1; }
-  body="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" \
-    "$(site_origin)/_api/sites/$site/pages/search?query=$marker&locales=en")" ||
+  body="$(curl_t "$SMOKE_WEB_MAX_TIME" "$(site_origin)/_api/sites/$site/pages/search?query=$marker&locales=en" \
+    --noproxy '*' --fail-with-body -b "$SMOKE_JAR")" ||
     { echo "搜索失败：$body"; return 1; }
   jq -e --arg p "wonton-smoke-$marker" '.results | map(.path) | index($p) != null' <<<"$body" >/dev/null ||
     { echo "搜不到页面 wonton-smoke-$marker：$(head -c 200 <<<"$body")"; return 1; }
