@@ -1,9 +1,15 @@
 port: 3000
 bindIP: 0.0.0.0
-# 数据库用镜像自带的 SQLite：一个文件，备份就是拷数据目录，不需要第二个服务和另一套凭据。
+# 数据库连接参数由 compose 的环境变量给：配置文件的 `$(名字)` 由 Wiki.js 启动时替换成同名环境变量。
+# 数据库是 PostgreSQL 17+（上游 3.x 的最低要求），用的就是同一个包里的 db 服务，不连外面的库。
 db:
-  type: sqlite
-  storage: /data/wiki.sqlite
-# 缓存和上传都在数据目录里，重建容器不丢；镜像里的 /wiki/data 会跟着容器消失。
-dataPath: /data/data
+  host: $(DB_HOST)
+  port: $(DB_PORT:5432)
+  user: $(DB_USER)
+  pass: $(DB_PASS)
+  db: $(DB_NAME)
+  schema: $(DB_SCHEMA:wiki)
+  ssl: false
+# 上传的文件和缓存都在数据目录里，重建容器不丢。
+dataPath: /data
 logLevel: info

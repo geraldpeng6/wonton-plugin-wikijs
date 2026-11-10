@@ -1,17 +1,33 @@
-// 首次安装时替主人走完 Wiki.js 的安装向导：上游 2.x 没有环境变量或命令行的初始化开关，向导是唯一的入口。
-// 向导建好的本地管理员只当底座，登录换成核心的身份提供方，打开网页即是主人；它的密码抄进数据目录给 init 用。
-// 已经配置过时向导接口返回 404，脚本接着核对身份和站点设置，所以每次创建容器都跑一遍也安全。
+// 一次性初始化：把 Wiki.js 的登录接到核心的身份提供方，站点地址、中文界面和反代信任也跟着设好。
+// 上游 3.x 首次启动从 ADMIN_EMAIL/ADMIN_PASS 建根管理员，安装向导没有了，场景统一走它的 REST 接口。
+// 每一步都是写最终值，已经设过的再写一遍也一样；每次创建容器（安装、升级、重建）都跑。
 //
 // 失败就退出非 0：安装回滚，错误里写清是哪一步。
 
+import { createRequire } from 'node:module'
 import { readFile, writeFile } from 'node:fs/promises'
+import { hasV2Data, migrateV2, v2Leftovers } from './migrate2.mjs'
 
-const BASE = 'http://wiki:3000'
+const BASE = 'http://wiki:3000/_api'
 // 本地管理员的地址：不能和主人的邮箱相同，OIDC 首次登录要按邮箱建新账号。
 const ADMIN_EMAIL = 'admin@wonton.local'
 // 管理员的密码落在数据目录里：核心的密钥可能换掉，用同一个值登录才不会被上一次安装挡住。
 const PASSWORD_FILE = '/data/admin-password'
+// 上游 2.x 的库文件由 migrate2.mjs 搬进 PostgreSQL，搬完写这个标记。
+const IMPORTED = '/data/.wonton-imported-2x'
+// 附件和评论自动迁移不搬：确认不要它们的人留这个文件（或给同名变量），之后的重建不再问。
+const DROP_FILE = '/data/.wonton-drop-attachments-comments'
+const DROP_VAR = 'WIKIJS_UPGRADE_DROP_ATTACHMENTS_COMMENTS'
+// 3.x 的登录回调地址里带策略的 UUID（/_api/auth/<id>/callback），而清单里的 redirect_paths 是静态的，
+// 所以策略的 id 固定成这个值（建好以后在库里改），核心登记的回调才和 Wiki.js 发出的对得上。
+const STRATEGY_ID = '4d18c8a0-1f2b-4a5e-9d0e-6c1f5a7b9c31'
 const TITLE = '知识库'
+// 内置本地登录策略的固定 id（上游 base.yml 的 systemIds.localAuthId）。
+const LOCAL_STRATEGY_ID = '5a528c4c-0a82-4ad2-96a5-2b23811e6588'
+const LOCALE = 'zh-CN'
+
+const require = createRequire('/wiki/backend/package.json')
+const { Client } = require('pg')
 
 const env = (name) => {
   const value = process.env[name]
@@ -28,25 +44,30 @@ class HttpError extends Error {
   }
 }
 
-async function request(method, path, body, jwt, opts = {}) {
+const cookieJar = new Map()
+
+async function request(method, path, body) {
   const headers = {}
   if (body !== undefined) headers['content-type'] = 'application/json'
-  if (jwt) headers.authorization = `Bearer ${jwt}`
+  if (cookieJar.size > 0) headers.cookie = [...cookieJar].map(([k, v]) => `${k}=${v}`).join('; ')
   const response = await fetch(`${BASE}${path}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(120_000),
-    ...opts,
   })
+  for (const raw of response.headers.getSetCookie()) {
+    const pair = raw.split(';', 1)[0]
+    const at = pair.indexOf('=')
+    if (at > 0) cookieJar.set(pair.slice(0, at), pair.slice(at + 1))
+  }
   const text = await response.text()
   if (!response.ok) throw new HttpError(response.status, text)
-  // 首页是 HTML，其余接口都是 JSON。
-  return response.headers.get('content-type')?.includes('application/json') && text ? JSON.parse(text) : text
+  return text ? JSON.parse(text) : {}
 }
 
 // 只重试传输失败和 5xx：4xx 是配置写错了，重试也没用。
-async function retry(label, run, attempts = 90, delay = 2000) {
+async function retry(label, run, attempts = 150, delay = 2000) {
   let last
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
@@ -60,16 +81,20 @@ async function retry(label, run, attempts = 90, delay = 2000) {
   throw new Error(`${label}：${last?.message ?? last}`)
 }
 
-async function graphql(query, variables, jwt) {
-  const data = await request('POST', '/graphql', { query, variables }, jwt)
-  if (data.errors?.length) throw new HttpError(500, data.errors.map((e) => e.message).join('；'))
-  return data.data
-}
-
-// 每个 mutation 都带 responseResult，成功与否看它。
-function done(result) {
-  const status = result?.responseResult
-  if (!status?.succeeded) throw new Error(status?.message ?? '响应里没有 responseResult')
+async function sql(query, params) {
+  const client = new Client({
+    host: env('DB_HOST'),
+    port: Number(process.env.DB_PORT ?? 5432),
+    user: env('DB_USER'),
+    password: env('DB_PASS'),
+    database: env('DB_NAME'),
+  })
+  try {
+    await client.connect()
+    return (await client.query(query, params)).rows
+  } finally {
+    await client.end().catch(() => {})
+  }
 }
 
 async function localPassword() {
@@ -82,189 +107,197 @@ async function localPassword() {
   return env('WONTON_SECRET_ADMIN_PASSWORD')
 }
 
-async function finalize(password) {
-  const body = {
-    siteUrl: env('WONTON_APP_URL').replace(/\/+$/, ''),
-    adminEmail: ADMIN_EMAIL,
-    adminPassword: password,
-    telemetry: false,
-  }
-  const result = await retry('完成安装向导', async () => {
+// 等应用答得出站点：站点在库里，答得出来就说明库已经建好、管理员和本地登录策略都种下了。
+// `/_api/` 的根路径被 Swagger UI 占着，站点要从它自己的接口取；`current` 按请求的主机名找，兜底是 `*`。
+async function waitReady() {
+  let last
+  for (let attempt = 1; attempt <= 150; attempt++) {
     try {
-      return await request('POST', '/finalize', body)
+      const site = await request('GET', '/sites/current')
+      if (site?.id) return
+      last = new Error('站点接口里没有 id')
     } catch (err) {
-      // 已经配置过：向导只在自己的进程里挂着，正常启动后就是 404。
-      if (err instanceof HttpError && err.status === 404) return { ok: true, configured: true }
-      throw err
+      // 应用刚起来时路由可能还没挂好，404 也算没就绪。
+      last = err
     }
-  }, 30, 2000)
-  if (!result.ok) throw new Error(`安装向导失败：${result.error ?? '没有说明'}`)
-  if (!result.configured) await writeFile(PASSWORD_FILE, password + '\n', { mode: 0o600 })
-  console.log(result.configured ? '已经有配置，跳过安装向导' : '安装向导完成')
-  return !result.configured
+    await sleep(2000)
+  }
+  throw new Error(`等 Wiki.js 响应：${last?.message ?? last}`)
 }
 
-// 向导结束后 Wiki.js 会在同一个进程里重启成正常服务，起来之前请求会失败或拿不到令牌，都要重试。
 async function login(password) {
-  return retry('登录本地管理员', async () => {
-    const data = await graphql(
-      'mutation($username:String!,$password:String!){ authentication { login(username:$username, password:$password, strategy:"local"){ jwt responseResult{ message } } } }',
-      { username: ADMIN_EMAIL, password },
-    )
-    const result = data?.authentication?.login
-    if (!result?.jwt) throw new HttpError(500, `登录响应里没有令牌（${result?.responseResult?.message ?? '没有说明'}）`)
-    return result.jwt
-  // 登录接口限每分钟 5 次，重试比它慢不然一直撞。
-  }, 15, 15000)
+  return retry(
+    '登录本地管理员',
+    async () => {
+      const result = await request('PUT', `/sites/${siteId}/auth/login`, {
+        strategyId: LOCAL_STRATEGY_ID,
+        username: ADMIN_EMAIL,
+        password,
+      })
+      if (!result?.ok) throw new HttpError(500, '登录响应里没有 ok')
+    },
+    15,
+    15_000,
+  )
 }
 
-const enabled = (strategy, patch) => ({ ...strategy, ...patch })
+async function useOidc(adminGroupId) {
+  const config = {
+    clientId: env('WONTON_OIDC_CLIENT_ID'),
+    clientSecret: env('WONTON_OIDC_CLIENT_SECRET'),
+    issuer: env('WONTON_OIDC_ISSUER'),
+    useDiscovery: true,
+    // 开发环境没有 TLS，签发方是插件网络里的 http 地址。
+    allowInsecureHttp: true,
+    // 核心只在主人配了邮箱时才发 email 声明，邮箱是 Wiki.js 的账号必填项。
+    scopes: 'openid profile email',
+    emailClaim: 'email',
+    displayNameClaim: 'name',
+  }
+  const fields = { displayName: 'Wonton', isEnabled: true, autoEnrollGroups: [adminGroupId], config }
 
-// 用 OIDC 认人，本地留着启用但界面上藏起来（root 管理员在它上面，删不掉，登录接口也还要用）。别的登录方式原样保留。
-async function useOidc(jwt) {
-  const { activeStrategies } = (await graphql(
-    '{ authentication { activeStrategies { key strategy { key } displayName order isEnabled selfRegistration domainWhitelist autoEnrollGroups config { key value } } } }',
-    {},
-    jwt,
-  )).authentication
-  const value = (text) => JSON.stringify({ v: text })
-  const oidcConfig = [
-    ['clientId', env('WONTON_OIDC_CLIENT_ID')],
-    ['clientSecret', env('WONTON_OIDC_CLIENT_SECRET')],
-    ['authorizationURL', env('WONTON_OIDC_AUTH_URL')],
-    ['tokenURL', env('WONTON_OIDC_TOKEN_URL')],
-    ['userInfoURL', env('WONTON_OIDC_USERINFO_URL')],
-    ['issuer', env('WONTON_OIDC_ISSUER')],
-    // 核心只在主人配了邮箱时发 email 声明，邮箱是 Wiki.js 的账号必填项。
-    ['emailClaim', 'email'],
-    ['displayNameClaim', 'name'],
-  ].map(([key, text]) => ({ key, value: value(text) }))
-
-  // activeStrategies 把配置包成 prop 对象放在 value 里，updateStrategies 只读它的 v。
-  const resend = ({ strategy, ...rest }) => ({
-    ...rest,
-    strategyKey: strategy.key,
-    config: rest.config.map((entry) => ({ key: entry.key, value: JSON.stringify({ v: JSON.parse(entry.value).value }) })),
-  })
-  const strategies = activeStrategies.map(resend).map((strategy) => {
-    if (strategy.key === 'oidc') {
-      // 主人首次登录时自动建账号，直接进 Administrators 组。
-      return enabled(strategy, { order: 0, isEnabled: true, selfRegistration: true, autoEnrollGroups: [1], config: oidcConfig })
+  const rows = await sql("SELECT id FROM authentication WHERE module = 'oidc'")
+  const fixed = rows.find((row) => row.id === STRATEGY_ID)
+  let renamed = false
+  if (!fixed) {
+    if (rows.length > 0) {
+      // 早先一次跑到一半（策略建了、id 没改成固定值）：改过来就行，配置随后重写。
+      await sql('UPDATE authentication SET id = $1 WHERE id = $2', [STRATEGY_ID, rows[0].id])
+      renamed = true
+    } else {
+      const created = await request('POST', '/authentication/strategies', { module: 'oidc', ...fields })
+      await sql('UPDATE authentication SET id = $1 WHERE id = $2', [STRATEGY_ID, created.id])
+      renamed = true
     }
-    // 留着启用：它的登录接口是 init 每次登录要用的；界面上被 hideLocal 藏起来，autoLogin 也只跳第一个策略。
-    if (strategy.key === 'local') return enabled(strategy, { order: 1, isEnabled: true })
-    return enabled(strategy, { order: strategy.order + 1 })
-  })
-  if (!strategies.some((strategy) => strategy.key === 'oidc')) {
-    strategies.push({
-      key: 'oidc',
-      strategyKey: 'oidc',
-      displayName: 'Wonton',
-      order: 0,
-      isEnabled: true,
-      selfRegistration: true,
-      domainWhitelist: [],
-      autoEnrollGroups: [1],
-      config: oidcConfig,
+  }
+  if (renamed) {
+    // 进程里记的还是旧 id：建一条临时策略再删掉，两次都会重读策略表。
+    const dummy = await request('POST', '/authentication/strategies', {
+      module: 'local',
+      displayName: 'reload',
     })
+    await request('DELETE', `/authentication/strategies/${dummy.id}`)
   }
-  done((await graphql(
-    'mutation($strategies:[AuthenticationStrategyInput]!){ authentication { updateStrategies(strategies:$strategies){ responseResult{ succeeded message } } } }',
-    { strategies },
-    jwt,
-  )).authentication.updateStrategies)
+  // 再写一遍：密钥换了（保留数据重装）也能更新，顺带把这次的展示名等字段写最终值。
+  await request('PUT', `/authentication/strategies/${STRATEGY_ID}`, fields)
 }
 
-// 站点地址跟着插件网页地址走；打开网页直接进 OIDC，不显示登录页。
-async function configureSite(jwt) {
-  const args = {
-    host: env('WONTON_APP_URL').replace(/\/+$/, ''),
-    authAutoLogin: true,
-    authHideLocal: true,
-    securityTrustProxy: true,
+// 站点：打开网页直接走身份提供方，本地登录只留给 init 和管理员兜底；标题只在还是上游默认值时改。
+async function configureSite(site, siteId, imported) {
+  const fields = {
+    authStrategies: [
+      { id: STRATEGY_ID, order: 0, isVisible: true },
+      { id: LOCAL_STRATEGY_ID, order: 1, isVisible: false },
+    ],
+    auth: { ...site.auth, autoLogin: true, hideLocal: true },
   }
-  const types = { host: 'String', title: 'String', authAutoLogin: 'Boolean', authHideLocal: 'Boolean', securityTrustProxy: 'Boolean' }
-  // 标题只在还是上游默认值时写：向导中途失败过（配置已写、标题还是默认）也能补上，主人改过的不覆盖。
-  const { title } = (await graphql('{ site { config { title } } }', {}, jwt)).site.config
-  if (title === 'Wiki.js' || !title) args.title = TITLE
-  const decl = Object.keys(args).map((name) => `$${name}:${types[name]}`).join(',')
-  const fields = Object.keys(args).map((name) => `${name}:$${name}`).join(',')
-  done((await graphql(
-    `mutation(${decl}){ site { updateConfig(${fields}){ responseResult{ succeeded message } } } }`,
-    args,
-    jwt,
-  )).site.updateConfig)
+  // 导入时站点名已经换成 2.x 的名字，这里不覆盖。
+  if (!imported && (site.title === 'Default Site' || !site.title)) fields.title = TITLE
+  await request('PUT', `/sites/${siteId}`, fields)
 }
 
-// 访客组不给权限：首页不再是匿名可见的空页面，打开插件网页会被跳到登录，再由 autoLogin 交给 OIDC。
-async function closeToGuests(jwt) {
-  done((await graphql(
-    'mutation { groups { update(id:2, name:"Guests", redirectOnLogin:"", permissions:[], pageRules:[]){ responseResult{ succeeded message } } } }',
-    {},
-    jwt,
-  )).groups.update)
-}
-
-// 默认中文：界面语言包不在镜像里，从上游的 Graph 节点下载。断网时下载不到就用英文，界面照样能用，不因此让安装失败。
-async function useChinese(jwt) {
-  const localeState = async () => (await graphql('{ localization { config { locale } locales { code isInstalled } } }', {}, jwt)).localization
-  let state = await localeState()
-  if (!state.locales.some((locale) => locale.code === 'zh')) {
-    console.log('上游没有中文语言包，界面留在英文')
-    return
-  }
-  if (!state.locales.find((locale) => locale.code === 'zh').isInstalled) {
-    done((await graphql(
-      'mutation { localization { downloadLocale(locale:"zh"){ responseResult{ succeeded message } } } }',
-      {},
-      jwt,
-    )).localization.downloadLocale)
-    state = await localeState()
-    // 下载任务自己吞掉网络错误，成功与否看语言包有没有装上。
-    if (!state.locales.find((locale) => locale.code === 'zh')?.isInstalled) {
-      console.log('中文语言包没下下来，界面留在英文')
+// 默认中文：语言包不在镜像里，从上游的仓库下载。断网时留在英文，界面照样能用，不因此让安装失败。
+async function useChinese(site, siteId) {
+  const locales = await request('GET', '/locales')
+  let zh = locales.find((locale) => locale.code === LOCALE)
+  if (!zh || !zh.isInstalled) {
+    await request('POST', '/locales/fetch')
+    locales.splice(0, locales.length, ...(await request('GET', '/locales')))
+    zh = locales.find((locale) => locale.code === LOCALE)
+    if (!zh) {
+      console.log('上游没有中文语言包，界面留在英文')
       return
     }
-  }
-  // 安装向导写的是 en；主人自己在设置里选过的语言不覆盖。
-  if (state.config.locale !== 'en') return
-  done((await graphql(
-    'mutation { localization { updateLocale(locale:"zh", autoUpdate:true, namespacing:false, namespaces:[]){ responseResult{ succeeded message } } } }',
-    {},
-    jwt,
-  )).localization.updateLocale)
-}
-
-// 没配置时 GraphQL 还不存在（404），这时看安装向导的页面。配置好以后首页会转登录，而登录地址在容器里解析不了，
-// 所以不能在配置好以后去探首页。
-async function waitReady() {
-  await retry('等 Wiki.js 响应', async () => {
-    try {
-      const data = await request('POST', '/graphql', { query: '{ __typename }' })
-      if (!data?.data) throw new HttpError(500, 'GraphQL 还没就绪')
-    } catch (err) {
-      if (!(err instanceof HttpError) || err.status !== 404) throw err
-      const page = await request('GET', '/', undefined, undefined, { redirect: 'manual' })
-      if (typeof page !== 'string' || !page) throw new HttpError(500, '安装向导的页面是空的')
+    if (!zh.isInstalled) {
+      await request('POST', `/locales/${LOCALE}/install`)
+      locales.splice(0, locales.length, ...(await request('GET', '/locales')))
+      if (!locales.find((locale) => locale.code === LOCALE)?.isInstalled) {
+        console.log('中文语言包没下下来，界面留在英文')
+        return
+      }
     }
-  }, 150, 2000)
+  }
+  const active = [...new Set([...(site.locales?.active ?? ['en']), LOCALE])]
+  await request('PUT', `/sites/${siteId}`, { locales: { ...site.locales, primary: LOCALE, active } })
 }
 
+// 附件和评论自动迁移不搬：默认停下让人确认，确认过就写标记文件（变量给的也算）。报错里的数量是这次数据库里的。
+async function dropAttachmentsComments() {
+  const asked = process.env[DROP_VAR] === '1'
+  const saved = await readFile(DROP_FILE, 'utf8').then(() => true, () => false)
+  if (asked && !saved) await writeFile(DROP_FILE, `${DROP_VAR}=1\n`)
+  return asked || saved
+}
+
+// 升级：数据目录里有 2.x 的库、这边的库还是空的，就把 2.x 搬过来。搬过一次就不再来（标记文件）。
+async function importFromV2(siteId) {
+  if (await readFile(IMPORTED, 'utf8').catch(() => '')) return false
+  if (!hasV2Data()) return false
+  const [{ count }] = await sql('SELECT count(*)::int AS count FROM pages')
+  if (count > 0) {
+    console.log('库里已经有页面，跳过 2.x 导入')
+    return false
+  }
+  const { attachments, comments } = v2Leftovers()
+  const drop = await dropAttachmentsComments()
+  if ((attachments > 0 || comments > 0) && !drop) {
+    throw new Error(
+      `2.x 的库里有 ${attachments} 个附件、${comments} 条评论，自动迁移不搬这两样，先停在升级前（2.x 的库没动）。` +
+        '要它们就先在 2.x 的管理区 → Utilities → “Export for Wiki.js 3.x” 导出一个 .wkbackup，' +
+        `确认不要（或者包已经在手上）再设 ${DROP_VAR}=1（或建文件 ${DROP_FILE}）装一次。`,
+    )
+  }
+  if (attachments > 0 || comments > 0) {
+    console.log(`按开关不搬 2.x 的 ${attachments} 个附件、${comments} 条评论，继续导入`)
+  }
+  console.log('数据目录里有 2.x 的库，开始导入')
+  const { totals, summary, title } = await migrateV2({ request, siteId, appUrl: env('WONTON_APP_URL') })
+  console.log(`导入完成：${JSON.stringify(totals)}`)
+  // 站点名跟着 2.x 的来，别让一次升级把主人起的名字改掉。
+  if (title) await request('PUT', `/sites/${siteId}`, { title })
+  for (const warning of summary?.warnings ?? []) console.log(`导入提醒：${warning}`)
+  await writeFile(IMPORTED, JSON.stringify({ totals, at: new Date().toISOString() }) + '\n')
+  return true
+}
+
+// 没配置过的策略对站点还不可见，登录也走不通；本地管理员是唯一的入口，它必须在站点上。
 async function main() {
   await waitReady()
+  const site = await request('GET', '/sites/current')
+  siteId = site.id
+
   const password = await localPassword()
-  const fresh = await finalize(password)
-  const jwt = await login(password)
-  await useOidc(jwt)
-  await configureSite(jwt)
-  if (fresh) await closeToGuests(jwt)
-  try {
-    await useChinese(jwt)
-  } catch (err) {
-    console.log(`中文界面没设上，界面留在英文：${err.message}`)
+  await login(password)
+  await request('PUT', '/system/security', { trustProxy: true })
+
+  const [administrators] = await sql("SELECT id FROM groups WHERE name = 'Administrators'")
+  if (!administrators) throw new Error('库里没有 Administrators 组')
+  await useOidc(administrators.id)
+  // 从 2.x 升上来看的是原来的页面，界面语言得跟着原来的主语言走；新装才设中文。
+  const imported = await importFromV2(siteId)
+  await configureSite(site, siteId, imported)
+  // 自检：登录入口必须答 302 跳去身份提供方；不答说明策略没生效，装上也登不进。
+  const entry = await fetch(`${BASE}/auth/${STRATEGY_ID}/authorize?siteId=${siteId}`, {
+    redirect: 'manual',
+    signal: AbortSignal.timeout(30_000),
+  })
+  if (entry.status !== 302) {
+    throw new Error(`OIDC 登录入口没就绪：HTTP ${entry.status} ${(await entry.text()).slice(0, 300)}`)
+  }
+  if (!imported) {
+    try {
+      await useChinese(site, siteId)
+    } catch (err) {
+      console.log(`中文界面没设上，界面留在英文：${err.message}`)
+    }
+  }
+  if (!(await readFile(PASSWORD_FILE, 'utf8').catch(() => ''))) {
+    await writeFile(PASSWORD_FILE, password + '\n', { mode: 0o600 })
   }
   console.log('初始化完成')
 }
+
+let siteId = ''
 
 main().catch((err) => {
   console.error(`init 失败：${err.message}`)
