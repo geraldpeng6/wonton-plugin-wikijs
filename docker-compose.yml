@@ -23,7 +23,7 @@ services:
     restart: unless-stopped
 
   wiki:
-    image: ghcr.io/requarks/wiki:3.2.0@sha256:b0ad43b76e8663c8125b2d1cf560f0c6537731024f0a8abd4d8f19478d367f32
+    image: ghcr.io/requarks/wiki:3.3.1@sha256:2bdfa19d02d3f0ce18020648cc38ca138c5467fe1cfc4765d4b5f2a59c8efcad
     # 镜像以 node 用户运行；数据目录归用户的用户。
     user: "${PUID}:${PGID}"
     environment:
@@ -64,7 +64,7 @@ services:
 
   # 一次性服务：接上核心的 OIDC、设站点和反代信任。都写最终值，每次创建容器都跑一遍。
   init:
-    image: ghcr.io/requarks/wiki:3.2.0@sha256:b0ad43b76e8663c8125b2d1cf560f0c6537731024f0a8abd4d8f19478d367f32
+    image: ghcr.io/requarks/wiki:3.3.1@sha256:2bdfa19d02d3f0ce18020648cc38ca138c5467fe1cfc4765d4b5f2a59c8efcad
     user: "${PUID}:${PGID}"
     entrypoint: ["node", "/etc/wiki/init.mjs"]
     environment:
