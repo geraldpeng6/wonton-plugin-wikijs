@@ -166,7 +166,8 @@ identity_check() {
   local out
   oidc_login || return 1
   out="$(curl_t "$SMOKE_WEB_MAX_TIME" "$(site_origin)/_api/users/whoami" --noproxy '*' --fail-with-body -b "$SMOKE_JAR")" || { echo "查询当前用户失败：$out"; return 1; }
-  jq -e --arg e "$SMOKE_OWNER_EMAIL" '.authenticated == true and .email == $e' <<<"$out" >/dev/null ||
+  # 核心给插件的邮箱声明固定是派生的内部邮箱（用户名@wonton.internal），真实邮箱不出核心。
+  jq -e --arg e "${SMOKE_OWNER}@wonton.internal" '.authenticated == true and .email == $e' <<<"$out" >/dev/null ||
     { echo "当前用户不是主人的 OIDC 账号：$out"; return 1; }
   # 根管理员拿的是 manage:system
   jq -e '.permissions | index("manage:system") != null' <<<"$out" >/dev/null ||

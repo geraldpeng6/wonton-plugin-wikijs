@@ -154,7 +154,15 @@ async function useOidc(adminGroupId) {
     emailClaim: 'email',
     displayNameClaim: 'name',
   }
-  const fields = { displayName: 'Wonton', isEnabled: true, autoEnrollGroups: [adminGroupId], config }
+  // 未知地址（主人的内部邮箱第一次登录时库里还没有）要能按 autoEnrollGroups 建号，注册必须显式开；
+  // 不开的话登录在库里查无此人时被拒（ERR_REGISTRATION_DISABLED），谁也进不来。
+  const fields = {
+    displayName: 'Wonton',
+    isEnabled: true,
+    registration: true,
+    autoEnrollGroups: [adminGroupId],
+    config,
+  }
 
   const rows = await sql("SELECT id FROM authentication WHERE module = 'oidc'")
   const fixed = rows.find((row) => row.id === STRATEGY_ID)
