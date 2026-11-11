@@ -1,6 +1,6 @@
 # 云吞插件：Wiki.js
 
-开发流程见[插件开发指南](https://github.com/geraldpeng6/wonton-docs/blob/main/develop.md)。
+开发流程见[插件开发指南](https://github.com/wontonapp/wonton-docs/blob/main/develop.md)。
 
 Wiki.js（[js.wiki](https://js.wiki)，AGPL-3.0）是自托管的知识库：页面、层级目录、Markdown 和所见即所得编辑器，按组分配
 读写权限。这个插件把它装进云吞：网页经核心网关打开，登录走核心的身份提供方，打开就是主人自己的知识库；数据存在同一个包里的
