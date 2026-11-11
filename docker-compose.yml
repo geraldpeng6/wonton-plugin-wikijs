@@ -110,8 +110,8 @@ x-wonton:
   id: io.requarks.wikijs
   version: 0.1.0
   kind: app
-  title: { zh: 知识库, en: Wiki }
-  description: { zh: 家里的知识库，Markdown 和所见即所得编辑，按组分配权限, en: A knowledge base for your household with Markdown and visual editing }
+  title: { zh: 家庭维基（Wiki.js）, en: Home Wiki (Wiki.js) }
+  description: { zh: 像家里自己的维基百科：页面互相链接、每次修改都留历史，谁能看、谁能改按组设。适合全家一起写、一起补充的资料页。, en: "Your household's own Wikipedia: pages link to each other, every edit is kept in history, and you decide by group who can read or edit. For pages the whole family writes together." }
   icon: icon.png
   notices: [NOTICE]
   author: { name: geraldpeng6, url: https://github.com/geraldpeng6 }
